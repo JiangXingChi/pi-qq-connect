@@ -485,11 +485,20 @@ export class QqBridge {
 			: { text, files: [], skipped: [] };
 		for (const skipped of parsed.skipped) this.log.warn(`文件标记被忽略：${skipped}`);
 		const body = markdown ? parsed.text.trim() : stripMarkdown(parsed.text);
-		const chunks = chunkText(body, {
-			chunkChars: this.cfg.chunkChars,
-			maxChunks: this.cfg.maxChunks,
-		});
-		if (chunks.length === 0 && parsed.files.length === 0) {
+
+		// 额度要给文件留位置：单聊总共 4 次，1 段文字 + 3 个文件正好用完。
+		const reserveAck = this.cfg.ackAfterMs > 0 && !inflight.ackSent ? 1 : 0;
+		const available = Math.max(0, inflight.attemptsLeft - reserveAck);
+		const wantText = body.length > 0 || parsed.files.length === 0;
+		const filesToSend = parsed.files.slice(0, Math.max(0, Math.min(parsed.files.length, available - (wantText ? 1 : 0))));
+		const textSlots = wantText ? Math.max(0, available - filesToSend.length) : 0;
+		const chunks = textSlots > 0
+			? chunkText(body, {
+					chunkChars: this.cfg.chunkChars,
+					maxChunks: Math.min(this.cfg.maxChunks, textSlots),
+				})
+			: [];
+		if (chunks.length === 0 && filesToSend.length === 0) {
 			// 正文被 Markdown 清理成空（例如只有围栏）时，至少回一句，别让用户干等
 			await this.#sendWithRetry(inflight, (seq) =>
 				this.api.sendText(replyTarget(item), this.cfg.emptyReply, { msgId, msgSeq: seq }),
@@ -535,11 +544,15 @@ export class QqBridge {
 		}
 		this.log.info(`已回复 ${sent}/${chunks.length} 段到 ${chatKey(item)}`);
 
-		if (parsed.files.length > 0 && !this.stopped) {
+		if (filesToSend.length > 0 && !this.stopped) {
 			const target = replyTarget(item);
 			let sentFiles = 0;
-			for (const file of parsed.files) {
+			for (const file of filesToSend) {
 				if (this.stopped) break;
+				if (inflight.attemptsLeft <= 0) {
+					this.log.warn("被动回复额度已用完，剩余文件不再上传");
+					break;
+				}
 				try {
 					const uploaded = await uploadFile(this.api, target, file, {
 						log: this.log,
@@ -563,7 +576,7 @@ export class QqBridge {
 					this.api.sendText(target, "文件发送失败，请查看 Pi 终端日志", { msgId, msgSeq: seq }),
 				).catch((err) => this.log.warn(`文件失败兜底也没发出去：${err?.message ?? err}`));
 			}
-			this.log.info(`已发送文件 ${sentFiles}/${parsed.files.length} 个到 ${chatKey(item)}`);
+			this.log.info(`已发送文件 ${sentFiles}/${filesToSend.length} 个到 ${chatKey(item)}`);
 		}
 	}
 }

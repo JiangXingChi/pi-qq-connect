@@ -581,6 +581,9 @@ test("集成：扩展 → 网关 → 注入 → 回 QQ", async () => {
 	assert.ok(ctx.notifications.some((n) => /后台服务/.test(n.message)));
 	await fake.commands.get("qq").handler("bogus", ctx);
 	assert.ok(ctx.notifications.at(-1).message.includes("take"), "帮助里应包含 take");
+	await fake.commands.get("qq").handler("new 测试会话", ctx);
+	assert.equal(ctx.newSessions.length, 1, "终端 /qq new 应调用 ctx.newSession");
+	assert.deepEqual(ctx.sessionInfo, ["测试会话"]);
 	await fake.commands.get("qq").handler("status", ctx);
 	assert.ok(ctx.notifications.some((n) => /网关/.test(n.message)));
 
@@ -633,6 +636,15 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 	await sleep(200);
 	assert.equal(mock.state.identifies.length, 0, "不应连接网关");
 	assert.ok(ctx.notifications.some((n) => /后台服务在线/.test(n.message)));
+
+	// 服务在线时 /qq take 不应抢锁或连网关
+	await fake.commands.get("qq").handler("take", ctx);
+	assert.ok(ctx.notifications.some((n) => /不需要 \/qq take/.test(n.message)));
+	assert.equal(mock.state.identifies.length, 0);
+
+	await fake.commands.get("qq").handler("new", ctx);
+	assert.equal(ctx.newSessions.length, 0, "服务在线时终端 /qq new 不应切换本地会话");
+	assert.ok(ctx.notifications.some((n) => /QQ 里发 \/qq new/.test(n.message)));
 
 	removeServiceState(serviceFile);
 	await fake.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);

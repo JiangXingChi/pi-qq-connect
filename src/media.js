@@ -126,6 +126,28 @@ async function hashFile(filePath, size) {
 	return { md5: md5.digest("hex"), sha1: sha1.digest("hex"), md5_10m: md5Head.digest("hex") };
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 分片 PUT / part_finish / 合并都可能遇到网络抖动或 5xx，重试 3 次；4xx 直接失败。 */
+async function withRetry(fn, label, log) {
+	let lastError;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			return await fn();
+		} catch (err) {
+			lastError = err;
+			const status = Number(err?.status ?? 0);
+			const transient = status === 0 || status === 429 || status >= 500;
+			if (!transient) throw err;
+			if (attempt < 2) {
+				log?.warn(`${label} 失败，第 ${attempt + 1} 次重试：${err?.message ?? err}`);
+				await sleep(500 * 2 ** attempt);
+			}
+		}
+	}
+	throw lastError;
+}
+
 async function readSlice(handle, offset, length) {
 	const buf = Buffer.alloc(length);
 	let read = 0;
@@ -166,20 +188,20 @@ export async function uploadFile(api, target, filePath, { log, maxBytes, allowDi
 			const length = Math.min(block, info.size - offset);
 			if (length <= 0) break;
 			const buf = await readSlice(handle, offset, length);
-			await api.putPresigned(part.presigned_url, buf);
-			await api.uploadPartFinish(target, {
+			await withRetry(() => api.putPresigned(part.presigned_url, buf), `PUT 分片 ${part.index}`, log);
+			await withRetry(() => api.uploadPartFinish(target, {
 				uploadId: prep.upload_id,
 				index: Number(part.index),
 				blockSize: length,
 				md5: createHash("md5").update(buf).digest("hex"),
-			});
+			}), `确认分片 ${part.index}`, log);
 			offset += length;
 		}
 		if (offset !== info.size) throw new Error(`分片只上传了 ${offset}/${info.size} 字节`);
 	} finally {
 		await handle.close();
 	}
-	const merged = await api.finishUpload(target, { uploadId: prep.upload_id });
+	const merged = await withRetry(() => api.finishUpload(target, { uploadId: prep.upload_id }), "合并分片", log);
 	if (!merged?.file_info) throw new Error("合并分片后没有返回 file_info");
 	log?.info(`文件已上传：${info.name}（${info.size} 字节，类型 ${fileType}，ttl ${merged.ttl ?? "?"}s）`);
 	return { fileInfo: merged.file_info, ttl: Number(merged.ttl ?? 0), name: info.name, size: info.size, fileType };

@@ -189,8 +189,9 @@ export class QqGateway {
 			return;
 		}
 
-		// 连上不到 5 秒就断，多半是凭据/权限问题：连续三次直接停
-		if (this.openedAt && Date.now() - this.openedAt < QUICK_DISCONNECT_MS) {
+		// 连上不到 5 秒就断，多半是凭据/权限问题：连续三次直接停。
+		// 4008 是平台限流，按 60 秒退避重试，不能算进快速断开。
+		if (code !== 4008 && this.openedAt && Date.now() - this.openedAt < QUICK_DISCONNECT_MS) {
 			this.quickDisconnects++;
 			if (this.quickDisconnects >= MAX_QUICK_DISCONNECTS) {
 				this.closing = true;
@@ -276,6 +277,7 @@ export class QqGateway {
 		this.openGeneration++; // 使正在 await 的旧 #open 失效
 		this.#clearTimers();
 		this.#closeSocket();
+		this.#setState("disconnected");
 		this.#scheduleReconnect();
 	}
 

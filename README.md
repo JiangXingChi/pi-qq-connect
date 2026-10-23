@@ -27,13 +27,15 @@
 
 ## 安装
 
+三种方式**选一种**，不要叠加（同一扩展会被加载两次，两个网关会抢锁）。
+
 从 npm（推荐）：
 
 ```bash
 pi install npm:pi-qqbot
 ```
 
-从源码 / 本地目录：
+从源码作为包安装：
 
 ```bash
 git clone https://github.com/<you>/pi-qqbot.git
@@ -41,11 +43,13 @@ cd pi-qqbot
 pi install .
 ```
 
-或者只把项目软链到 Pi 扩展目录（开发时方便）：
+开发时只软链（不写 settings）：
 
 ```bash
 ./scripts/install.sh
 ```
+
+已用 `pi install` 装过时，`install.sh` 会检测到并拒绝执行。
 
 它会软链到 `~/.pi/agent/extensions/pi-qqbot`，并在不存在时生成一份
 `~/.pi/agent/pi-qqbot.json`（权限 600）。填配置：
@@ -179,7 +183,7 @@ systemctl --user enable --now pi-qqbot
 ## 开发
 
 ```bash
-npm test                  # 36 项单测 + mock QQ
+npm test                  # 38 项单测 + mock QQ
 npm run e2e               # 真 pi --mode rpc + mock QQ（会调一次模型）
 npm run e2e:service       # 后台服务进程生命周期
 npm run e2e:service-cmd   # 真 pi 里 /qq start|stop

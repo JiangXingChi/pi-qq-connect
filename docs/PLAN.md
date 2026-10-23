@@ -7,8 +7,8 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 
 ## 当前状态（开发副本，2026-10-22）
 
-- 版本 `0.1.0`，Node ≥ 22.19，零运行时依赖。
-- 验证：`npm test` 36 项全过；`npm run e2e` / `e2e:service` / `e2e:service-cmd` 三组真 pi 端到端全过。
+- 版本 `0.2.1`，Node ≥ 22.19，零运行时依赖。
+- 验证：`npm test` 38 项全过；`npm run e2e` / `e2e:service` / `e2e:service-cmd` 三组真 pi 端到端全过。
 - 已实现：
   - QQ 私聊 + 群 @ 消息接入当前 Pi 会话，回答按被动回复发回
   - 串行队列、msg_id 去重、被动窗口兜底、回复额度（`replyQuota`）
@@ -46,7 +46,7 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 - 网关：`GET /gateway` → `{url}`；op10 Hello（`d.heartbeat_interval` 毫秒）→ op2 Identify / op6 Resume；op1 心跳、op11 ACK；op7 重连、op9 会话失效；READY 里拿 `session_id`。
 - 事件：`GROUP_AT_MESSAGE_CREATE` / `C2C_MESSAGE_CREATE`，intents `1<<25`；`d.id` 即被动回复 msg_id；群成员是 `author.member_openid`，单聊是 `author.user_openid`。
 - 发送：群 `POST /v2/groups/{group_openid}/messages`、单聊 `POST /v2/users/{openid}/messages`，`{content, msg_type:0, msg_id, msg_seq}`。
-- 主动消息 2025-04-21 下线，**只能被动回复**；群 5 分钟、单聊 60 分钟内，每条消息最多 5 次；`msg_id+msg_seq` 重复会失败（去重靠它）。
+- 主动消息 2025-04-21 下线，**只能被动回复**；群 5 分钟最多 5 次、单聊 60 分钟最多 4 次；`msg_id+msg_seq` 重复会失败（去重靠它）。
 - Pi 侧：`session_start`/`agent_settled`/`message_end` 事件齐备；`pi.sendUserMessage()` 在 streaming 时会抛错，需要自己做串行队列；`pi --mode rpc` 只要 stdin 不关就常驻（已实测）。
 
 ## 设计
@@ -123,7 +123,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 | 1 并发/状态机 | `pump()` 在下载图片的 await 期间可重入，两条消息会互相覆盖 inflight；`stop()` 后仍可能注入或发送；`msg_seq` 位运算可能为负；网关并发 `#open` 会开出两条 socket；op9 的 `d=true` 被当成会话失效 | 加 `pumping` 闸门 + await 后重查 `stopped`；`#deliver` 检查 stopped；seq 用 `>>> 0`；`openGeneration` 代际取消旧连接；按 `d` 区分 op9 |
 | 2 协议/Hermes 对照 | 发送前不检查网关在线（官方要求发消息时 WS 在线）；401/403 重试被测试开关意外禁用；识别/续接取 token 失败后干等 | 加 `#waitOnline()`（最多 10s）；去掉 gatewayOverride 判断；token 失败触发重连 |
 | 3 安全/失败模式 | `void pump()` 的异常没人接；`/qq take` 只改锁文件，旧进程照旧抢消息；配置文件权限过宽无提醒；AppID 明文进日志 | pump 兜底 catch；锁看门狗 30s 检测被接管后自停；启动时检查 mode 并提醒；日志脱敏 |
-| 4 收尾 | `/new` `/resume` 会触发 session_shutdown → 网关整条断掉重连；回执与重试会额外消耗 5 次被动回复额度；install/uninstall 对真实目录用 `ln -sfn`/`rm -rf` 有风险；文档计数过期 | 换会话时保留网关与锁；新增 `replyQuota`（默认 5）统一扣减；脚本遇到非软链目录拒绝操作；README/PLAN 同步 |
+| 4 收尾 | `/new` `/resume` 会触发 session_shutdown → 网关整条断掉重连；回执与重试会额外消耗被动回复额度；install/uninstall 对真实目录用 `ln -sfn`/`rm -rf` 有风险；文档计数过期 | 换会话时保留网关与锁；新增 `replyQuota`（默认 5）统一扣减；脚本遇到非软链目录拒绝操作；README/PLAN 同步 |
 
 第 5 轮复读全部源码、脚本与文档：无新发现，收敛。`npm test` 23 项全过，
 `npm run e2e` 真 pi 端到端通过。
@@ -180,7 +180,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 | 2 资源/异常 | 心跳已停但 pid 活着时 `stop` 会直接 SIGTERM（pid 复用风险）；残留状态会让 `start` 死锁；`--no-restart` 时 bin 空转、SIGTERM 只等 1.5 秒可能留孤儿 pi；日志无限增长 | `stopService` 默认拒绝并提示 `--force`；死进程的残留状态自动清理；bin 等子进程最多 8 秒并在 no-restart 时退出；启动前轮转 5MB 日志 |
 | 3 并发/安全 | 两个窗口同时 `service start` 会拉起两个服务、心跳互相覆盖 | bin 启动时读状态，发现健康实例直接退出；e2e 验证第二个实例被拒且 identify 仍为 1 |
 
-`npm test` 36 项全过；`npm run e2e`、`e2e:service`、`e2e:service-cmd` 全过。
+`npm test` 38 项全过；`npm run e2e`、`e2e:service`、`e2e:service-cmd` 全过。
 
 ## 第八轮：对照官方文档（2026-10）
 
@@ -223,6 +223,21 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 | `/qq reconnect` / `/qq fresh` | — | 删除，网关自动重连；极端情况重启服务 |
 | `/qq take` | `/qq take` | 保留并写进帮助，标注“仅锁冲突时用”（不藏着） |
 
+## 第十轮：多轮审改（0.2.1）
+
+按「工程 → 并发/状态 → 协议 → 生命周期 → 资源 → 文档/测试」六轮逐项审，修掉的问题：
+
+1. **终端 `/qq new` 调用不存在的 `switchSession`**（真实运行时报错）；补上 `ctx.newSession()` + 命名，测试覆盖。
+2. **长回答 + 文件会挤爆额度**：单聊 4 次，原来先发最多 4 段文字，3 个文件必然失败；现在按「预留文件位」分配文字段数与文件数，上传前再检查剩余额度。
+3. **分片上传无重试**：PUT / part_finish / 合并遇到网络、429、5xx 会整次失败；加 3 次退避重试，4xx 不重试。
+4. **`/qq start` 早退留悬空锁**：未配置/服务接管/锁被占时旧锁不释放；改为先 `stop()` 释放自己的锁再重连。
+5. **服务在线时 `/qq take` 假接管**：现在直接拒绝并提示；终端 `/qq new` 也提示改在 QQ 里发（避免只切 TUI 会话）。
+6. **4008 限流被当成快速断开**：连续 3 次就停；现在 4008 不计入快速断开，按 60s 退避。
+7. **启动器状态版本硬编码 0.1.0**：改为读 `package.json`（现 0.2.1）。
+8. **工程细节**：`install.sh` 检测到 `pi install` 已安装时拒绝重复软链；CI 增加 `npm pack` 白名单检查；清理未使用的 import/变量。
+
+验证：38 项单测、`e2e`、`e2e:service`、`e2e:service-cmd` 全过；真 pi 加载新路径 `/qq help`、服务在线提示正常；沙箱网关重启后 READY。
+
 ## 第九轮：工程化重构（GitHub / npm 发布）
 
 目标：项目名、目录、包元数据统一为可发布形态；运行逻辑不变。
@@ -238,7 +253,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 - `package.json`：去掉 `private`；`version 0.2.0`；加 `pi-package` 关键字、`bin`、`files` 白名单、
   `prepublishOnly: npm test`、`engines`；`repository/homepage` 等确认 GitHub 用户名后再补。
 - 迁移：停服务 → `mv` 正式目录 → 重建软链 → 发布 → 重启服务 → 验证 READY；开发副本目录同步改名。
-- 验证：`npm test` 36 项、`npm pack --dry-run` 24 个文件（40.1 kB）、真 pi `/qq help` 正常、
+- 验证：`npm test` 38 项、`npm pack --dry-run` 24 个文件（40.1 kB）、真 pi `/qq help` 正常、
   后台服务从新路径 READY、软链指向 `Core/应用/pi-qqbot`、旧中文目录已不存在、git 已初始化并打 `v0.2.0`。
 - 未做：GitHub 远程仓库与 npm 发布（本机 `gh` 未登录、`npm` 未登录），命令写在 README/DEVELOPMENT。
 

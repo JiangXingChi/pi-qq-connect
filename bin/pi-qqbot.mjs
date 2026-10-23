@@ -11,6 +11,7 @@
  */
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +25,7 @@ import {
 } from "../src/service.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const baseDir = path.dirname(configPath());
 const stateFile = serviceStatePath(baseDir);
 
@@ -56,7 +58,7 @@ function beat() {
 			heartbeatAt: new Date().toISOString(),
 			sessionId: String(sessionId),
 			cwd: String(cwd),
-			version: "0.1.0",
+			version: pkg.version,
 		});
 	} catch {
 		// 状态文件写不进去不影响机器人

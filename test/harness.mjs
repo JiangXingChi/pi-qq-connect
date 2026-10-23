@@ -45,9 +45,22 @@ export function createFakePi() {
 export function createFakeCtx() {
 	const notifications = [];
 	const statuses = [];
+	const newSessions = [];
+	const sessionInfo = [];
 	return {
 		notifications,
 		statuses,
+		newSessions,
+		sessionInfo,
+		async newSession(options = {}) {
+			newSessions.push(options);
+			await options.setup?.({
+				appendSessionInfo(name) {
+					sessionInfo.push(name);
+				},
+			});
+			return { cancelled: false };
+		},
 		ui: {
 			notify(message, level) {
 				notifications.push({ message, level });

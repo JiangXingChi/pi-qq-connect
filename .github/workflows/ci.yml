@@ -13,3 +13,7 @@ jobs:
         with:
           node-version: "22"
       - run: npm test
+      - name: Check npm tarball contents
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          ! grep -Eq 'pi-qqbot\.json|\.log|/test/|\.git' /tmp/pack.txt

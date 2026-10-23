@@ -16,7 +16,6 @@ import {
 	isServiceAlive,
 	readServiceState,
 	removeServiceState,
-	serviceLogPath,
 	serviceStatePath,
 	startService,
 	stopService,
@@ -127,6 +126,21 @@ export default function createExtension(pi) {
 		if (release && state.config?.lock !== false) releaseLock(lockFilePath());
 	}
 
+	/** 终端里 /qq new 直接切；失败只提示，不打断当前会话。 */
+	async function switchSession(ctx, name = "") {
+		const label = String(name ?? "").trim();
+		try {
+			const result = await ctx.newSession({
+				setup: async (sessionManager) => {
+					if (label) sessionManager.appendSessionInfo(label);
+				},
+			});
+			if (result?.cancelled) notify("开新会话被取消", "warning");
+		} catch (err) {
+			notify(`开新会话失败：${err?.message ?? err}`, "warning");
+		}
+	}
+
 	/** 通过 Pi 的扩展命令通道开新会话：sendUserMessage 的 expandPromptTemplates 会执行 /qq new。 */
 	function requestNewSession(args = "") {
 		const text = args ? `/qq new ${args}` : "/qq new";
@@ -149,7 +163,8 @@ export default function createExtension(pi) {
 		state.starting = true;
 		state.ctx = ctx ?? state.ctx;
 		try {
-			stop({ release: false });
+			// 自己先让出网关和锁；后面早退（未配置/被服务接管/锁被占）时不会留下悬空锁
+			stop();
 			state.error = null;
 			state.lastInbound = undefined;
 
@@ -314,7 +329,6 @@ export default function createExtension(pi) {
 	/** 启动后台常驻服务。 */
 	async function startBackground() {
 		const file = serviceStatePath(baseDir());
-		const logFile = serviceLogPath(baseDir());
 		const svc = readServiceState(file);
 		if (svc && isServiceAlive(svc)) {
 			notify(`后台服务已在运行：${describeService(svc)}`, "info");
@@ -403,10 +417,16 @@ export default function createExtension(pi) {
 				case "stop":
 					await stopBackground(rest.includes("--force"));
 					return;
-				case "new":
+				case "new": {
+					const svc = readServiceState(serviceStatePath(baseDir()));
+					if (svc && isServiceAlive(svc)) {
+						notify("后台服务在线：QQ 会话由服务管理，请在 QQ 里发 /qq new；终端 /new 只切本地 TUI", "warning");
+						return;
+					}
 					notify("正在开新会话…", "info");
 					await switchSession(ctx, rest.join(" "));
 					return;
+				}
 				case "log": {
 					const n = Number(rest[0]) > 0 ? Math.min(Number(rest[0]), 200) : 20;
 					const tail = state.logger?.tail(n) ?? ["（没有日志）"];
@@ -414,7 +434,12 @@ export default function createExtension(pi) {
 					return;
 				}
 				case "take": {
-					// 隐藏的恢复命令：锁被另一个活进程占用时强制接管并本地连网关
+					// 恢复命令：锁被另一个活进程占用时强制接管并本地连网关
+					const svc = readServiceState(serviceStatePath(baseDir()));
+					if (svc && isServiceAlive(svc)) {
+						notify(`后台服务在线（${describeService(svc)}），不需要 /qq take`, "info");
+						return;
+					}
 					const lock = acquireLock(lockFilePath(), { force: true });
 					if (!lock.ok) {
 						notify("接管失败", "warning");

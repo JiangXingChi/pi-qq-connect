@@ -7,6 +7,19 @@ EXT_DIR="$HOME/.pi/agent/extensions"
 DEST="$EXT_DIR/pi-qqbot"
 CONF="$HOME/.pi/agent/pi-qqbot.json"
 
+# 已经通过 `pi install` 装过时不要再软链，否则同一扩展会被加载两次、两个网关抢锁。
+SETTINGS="$HOME/.pi/agent/settings.json"
+if [ -f "$SETTINGS" ] && node -e '
+const fs=require("fs");const p=process.argv[1];
+try{const s=JSON.parse(fs.readFileSync(p,"utf8"));const list=Array.isArray(s.packages)?s.packages:[];
+const hit=list.some((x)=>{const src=typeof x==="string"?x:(x&&x.source)||"";return /pi-qqbot/.test(src);});
+process.exit(hit?0:1);}catch{process.exit(1);}
+' "$SETTINGS"; then
+	echo "检测到 settings.json 里已经用 pi install 安装过 pi-qqbot。" >&2
+	echo "不要再跑本脚本，否则扩展会被加载两次。用 pi list / pi update --extensions 管理。" >&2
+	exit 1
+fi
+
 mkdir -p "$EXT_DIR"
 if [ -e "$DEST" ] && [ ! -L "$DEST" ]; then
 	echo "错误：$DEST 已存在且不是软链接（可能是旧的手工拷贝）。" >&2

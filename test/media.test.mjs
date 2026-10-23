@@ -103,6 +103,113 @@ test("上传：预上传 → 分片 PUT → 确认 → 合并 → 富媒体发�
 	}
 });
 
+test("上传：网络/5xx 重试，4xx 不重试", async () => {
+	const dir = await fs.promises.mkdtemp(path.join(process.cwd(), "test", "tmp-retry-media-"));
+	const file = path.join(dir, "a.bin");
+	await fs.promises.writeFile(file, Buffer.alloc(10, 1));
+	const counts = { put: 0, part: 0, merge: 0 };
+	const stub = (failMergeStatus = 0) => ({
+		async uploadPrepare() {
+			return { upload_id: "u", block_size: "10", parts: [{ index: 1, presigned_url: "http://x/1", block_size: "10" }] };
+		},
+		async putPresigned() {
+			counts.put++;
+			if (counts.put === 1) throw new Error("ECONNRESET");
+		},
+		async uploadPartFinish() {
+			counts.part++;
+			if (counts.part === 1) {
+				const error = new Error("server error");
+				error.status = 500;
+				throw error;
+			}
+		},
+		async finishUpload() {
+			counts.merge++;
+			if (failMergeStatus) {
+				const error = new Error("bad request");
+				error.status = failMergeStatus;
+				throw error;
+			}
+			if (counts.merge === 1) {
+				const error = new Error("server error");
+				error.status = 503;
+				throw error;
+			}
+			return { file_info: "fi-retry", ttl: 300 };
+		},
+	});
+	try {
+		const ok = await uploadFile(stub(), { type: "private", openid: "u1" }, file, { log: silentLog });
+		assert.equal(ok.fileInfo, "fi-retry");
+		assert.equal(counts.put, 2);
+		assert.equal(counts.part, 2);
+		assert.equal(counts.merge, 2);
+
+		await assert.rejects(
+			() => uploadFile(stub(400), { type: "private", openid: "u1" }, file, { log: silentLog }),
+			/bad request/,
+		);
+	} finally {
+		await fs.promises.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("桥：长文本 + 3 个文件时给文件留额度", async () => {
+
+	const dir = await fs.promises.mkdtemp(path.join(process.cwd(), "test", "tmp-quota-media-"));
+	const files = [];
+	for (let i = 0; i < 3; i++) {
+		const file = path.join(dir, `f${i}.txt`);
+		await fs.promises.writeFile(file, "x");
+		files.push(file);
+	}
+	const fake = createFakePi();
+	const sends = [];
+	const media = [];
+	const api = {
+		auth: { getToken: async () => "t" },
+		async sendText(_target, content, meta) {
+			sends.push({ content, ...meta });
+		},
+		async sendTyping() {},
+		async sendMedia(_target, fileInfo, meta) {
+			media.push({ fileInfo, ...meta });
+		},
+		async uploadPrepare() {
+			return { upload_id: "u", block_size: "1", parts: [{ index: 1, presigned_url: "http://mock/1", block_size: "1" }] };
+		},
+		async putPresigned() {},
+		async uploadPartFinish() {},
+		async finishUpload() {
+			return { file_info: "fi", ttl: 300 };
+		},
+	};
+	const bridge = new QqBridge({
+		pi: fake.pi,
+		api,
+		config: normalizeConfig({ allowAll: true, chunkChars: 100, maxChunks: 4 }),
+		log: silentLog,
+	});
+	try {
+		bridge.enqueue({
+			kind: "private", chatId: "user-1", userId: "user-1", msgId: "msg-q",
+			text: "画图", attachments: [], receivedAt: Date.now(),
+		});
+		await waitFor(() => fake.sent.length === 1);
+		bridge.onAgentStart();
+		const text = `很长的回答${"啊".repeat(500)}\n` + files.map((f) => `[[file:${f}]]`).join("\n");
+		bridge.onMessageEnd({ role: "assistant", content: text });
+		bridge.onAgentSettled(false);
+		await waitFor(() => media.length === 3, { label: "3 个文件" });
+		assert.equal(sends.length, 1, "单聊额度 4：1 段文字 + 3 个文件");
+		assert.equal(media.length, 3);
+	} finally {
+		bridge.stop?.();
+		await fs.promises.rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("桥：[[file:...]] 会被摘掉并作为富媒体发送", async () => {
 	const dir = await fs.promises.mkdtemp(path.join(process.cwd(), "test", "tmp-bridge-media-"));
 	const file = path.join(dir, "chart.png");
@@ -113,12 +220,12 @@ test("桥：[[file:...]] 会被摘掉并作为富媒体发送", async () => {
 	const sends = [];
 	const api = {
 		auth: { getToken: async () => "test-token" },
-		async sendText(target, content, meta) {
-			sends.push({ target, content, ...meta });
+		async sendText(_target, content, meta) {
+			sends.push({ target: _target, content, ...meta });
 		},
 		async sendTyping() {},
-		async sendMedia(target, fileInfo, meta) {
-			media.push({ target, fileInfo, ...meta });
+		async sendMedia(_target, fileInfo, meta) {
+			media.push({ target: _target, fileInfo, ...meta });
 		},
 		async uploadPrepare() {
 			return { upload_id: "u1", block_size: "4", parts: [{ index: 0, presigned_url: "http://mock/0", block_size: "4" }] };
