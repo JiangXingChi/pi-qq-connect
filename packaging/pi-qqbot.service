@@ -1,0 +1,16 @@
+[Unit]
+Description=pi-qqbot — QQ 官方机器人接入 Pi 会话
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 路径按需修改；--cwd 是 pi 的工作目录（QQ 里让 agent 干活的位置）
+ExecStart=%h/Agent/Core/应用/QQ机器人/bin/pi-qqbot.mjs --cwd %h
+WorkingDirectory=%h
+Restart=always
+RestartSec=5
+Environment=NO_COLOR=1
+
+[Install]
+WantedBy=default.target

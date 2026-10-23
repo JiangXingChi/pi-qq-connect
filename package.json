@@ -1,0 +1,53 @@
+{
+  "name": "pi-qqbot",
+  "version": "0.2.0",
+  "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻",
+  "type": "module",
+  "license": "MIT",
+  "author": "pi-qqbot contributors",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "qq",
+    "qqbot",
+    "chatbot",
+    "bridge"
+  ],
+  "bin": {
+    "pi-qqbot": "./bin/pi-qqbot.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "files": [
+    "index.js",
+    "src",
+    "bin",
+    "examples",
+    "packaging",
+    "scripts/install.sh",
+    "scripts/uninstall.sh",
+    "docs/ARCHITECTURE.md",
+    "docs/DEVELOPMENT.md",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test test/unit.test.mjs test/media.test.mjs",
+    "e2e": "node test/e2e.mjs",
+    "e2e:service": "node test/e2e-service.mjs",
+    "e2e:service-cmd": "node test/e2e-service-cmd.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "enabled": true,
+  "appId": "替换成你的AppID",
+  "clientSecret": "替换成你的AppSecret",
+  "sandbox": true,
+  "allowAll": false,
+  "allowUsers": [
+    "你的QQ的user_openid（沙箱期可先留空+allowAll=true 试）"
+  ],
+  "allowGroups": [],
+  "envelope": true,
+  "replyFormat": "plain",
+  "maxChunks": 4,
+  "replyQuota": 5,
+  "chunkChars": 4000,
+  "typing": true,
+  "ackAfterMs": 0,
+  "images": {
+    "enabled": true,
+    "maxCount": 2,
+    "maxBytes": 8388608
+  },
+  "files": {
+    "enabled": true,
+    "maxCount": 3,
+    "maxBytes": 209715200,
+    "allowDirs": []
+  },
+  "log": {
+    "file": "~/.pi/agent/pi-qqbot.log",
+    "level": "info"
+  },
+  "endpoints": {
+    "token": "",
+    "api": "",
+    "gateway": ""
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+*.log
+*.tgz
+.DS_Store
+.env
+/pi-qqbot.json
+sessions/
+test/tmp-*
+.pi/

@@ -1,0 +1,87 @@
+/**
+ * 测试用：假 Pi 扩展 API、假 ctx、临时配置。
+ */
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+export function createFakePi() {
+	const handlers = new Map();
+	const sent = [];
+	const commands = new Map();
+	const pi = {
+		streaming: false,
+		on(name, fn) {
+			const list = handlers.get(name) ?? [];
+			list.push(fn);
+			handlers.set(name, list);
+			return () => {
+				const current = handlers.get(name) ?? [];
+				handlers.set(name, current.filter((item) => item !== fn));
+			};
+		},
+		registerCommand(name, options) {
+			commands.set(name, options);
+		},
+		sendUserMessage(content, options) {
+			if (pi.streaming) throw new Error("Cannot send a user message while the agent is streaming");
+			sent.push({ content, options, at: Date.now() });
+		},
+	};
+	return {
+		pi,
+		sent,
+		commands,
+		async emit(name, payload, ctx) {
+			for (const fn of handlers.get(name) ?? []) await fn(payload, ctx);
+		},
+		handlerCount(name) {
+			return (handlers.get(name) ?? []).length;
+		},
+	};
+}
+
+export function createFakeCtx() {
+	const notifications = [];
+	const statuses = [];
+	return {
+		notifications,
+		statuses,
+		ui: {
+			notify(message, level) {
+				notifications.push({ message, level });
+			},
+			setStatus(key, text) {
+				statuses.push({ key, text });
+			},
+		},
+		sessionManager: {
+			getSessionId: () => "test-session-id",
+			getSessionFile: () => "/tmp/test-session.jsonl",
+		},
+	};
+}
+
+let tempDir;
+export function tempConfigPath() {
+	if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qqbot-test-"));
+	return path.join(tempDir, `config-${Math.random().toString(36).slice(2)}.json`);
+}
+
+export function writeConfig(configPath, config) {
+	fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+	return configPath;
+}
+
+export async function waitFor(check, { timeoutMs = 5000, intervalMs = 25, label = "条件" } = {}) {
+	const started = Date.now();
+	for (;;) {
+		const value = await check();
+		if (value) return value;
+		if (Date.now() - started > timeoutMs) throw new Error(`等待超时：${label}`);
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+}
+
+export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
