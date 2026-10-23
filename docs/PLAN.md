@@ -7,7 +7,7 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 
 ## 当前状态（2026-10-23）
 
-- 版本 `0.2.7`，Node ≥ 22.19，零运行时依赖。
+- 版本 `0.2.8`，Node ≥ 22.19，零运行时依赖。
 - 验证：`npm test` 45 项全过；`npm run e2e` / `e2e:service` / `e2e:service-cmd` 三组真 pi 端到端全过。
 - 已实现：
   - QQ 私聊 + 群 @ 消息接入当前 Pi 会话，回答按被动回复发回
@@ -144,7 +144,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 实现：
 
 - 新增 `/qq new [名称]` 子命令，内部 `ctx.newSession()`（带名字时 `appendSessionInfo`）。
-- QQ 的 `/qq new` 由桥拦截：不注入模型 → `requestNewSession()` dispatch 命令 → 6 秒内没收到
+- QQ 的 `/qq new` 由桥拦截：不注入模型 → `requestNewSession()` dispatch 命令 → 15 秒内没收到
   `session_start(new)` 就回执失败。
 - 会话切换后：`bridge.reset()` 丢掉旧队列与进行中的输出，`onSessionSwitched()` 给原会话回
   「✅ 已开新会话」；网关、锁、锁看门狗全部保留。

@@ -166,8 +166,8 @@ export default function createExtension(pi) {
 		if (state.newSessionTimer) clearTimeout(state.newSessionTimer);
 		state.newSessionTimer = setTimeout(() => {
 			state.newSessionTimer = undefined;
-			state.bridge?.notifyNewSessionFailed("6 秒内没有切到新会话");
-		}, 6000);
+			state.bridge?.notifyNewSessionFailed("15 秒内没有切到新会话");
+		}, 15_000);
 		state.newSessionTimer.unref?.();
 	}
 
