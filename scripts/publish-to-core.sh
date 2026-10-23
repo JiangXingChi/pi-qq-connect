@@ -38,7 +38,6 @@ EXCLUDES=(
 	--exclude=sessions
 	--exclude='test/tmp-*'
 	--exclude=scripts/publish-to-core.sh
-	--exclude=docs/DEVELOPMENT.md
 )
 
 echo "源：   $SRC"
@@ -91,12 +90,12 @@ echo "已备份正式版：$BACKUP"
 
 rsync -a --delete "${EXCLUDES[@]}" "$SRC/" "$TARGET/"
 
-if diff -rq --exclude=.git --exclude=.github --exclude=publish-to-core.sh --exclude=DEVELOPMENT.md \
+if diff -rq --exclude=.git --exclude=.github --exclude=publish-to-core.sh \
 	--exclude='*.log' --exclude=sessions --exclude='tmp-*' "$SRC" "$TARGET" >/dev/null; then
 	echo "校验通过：开发副本与正式目录一致"
 else
 	echo "警告：发布后仍有差异，请检查" >&2
-	diff -rq --exclude=.git --exclude=.github --exclude=publish-to-core.sh --exclude=DEVELOPMENT.md \
+	diff -rq --exclude=.git --exclude=.github --exclude=publish-to-core.sh \
 		--exclude='*.log' --exclude=sessions --exclude='tmp-*' "$SRC" "$TARGET" >&2 || true
 	exit 1
 fi
