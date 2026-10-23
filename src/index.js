@@ -106,6 +106,13 @@ export default function createExtension(pi) {
 		}
 	}
 
+	/** 当前进程是不是状态文件里那个后台服务（bin 会注入 QQBOT_SERVICE_PID）。 */
+	function isServiceProcess(service) {
+		return Boolean(
+			process.env.QQBOT_SERVICE_PID && service && String(service.pid) === process.env.QQBOT_SERVICE_PID,
+		);
+	}
+
 	function stop({ release = true } = {}) {
 		if (state.lockWatch) {
 			clearInterval(state.lockWatch);
@@ -190,9 +197,7 @@ export default function createExtension(pi) {
 			const serviceFile = serviceStatePath(baseDir());
 			const service = readServiceState(serviceFile);
 			const serviceAlive = Boolean(service && isServiceAlive(service));
-			const iAmService = Boolean(
-				process.env.QQBOT_SERVICE_PID && service && String(service.pid) === process.env.QQBOT_SERVICE_PID,
-			);
+			const iAmService = isServiceProcess(service);
 			if (serviceAlive && !iAmService) {
 				setStatus("服务在线", `pid ${service.pid}`);
 				notify(`pi-qqbot: 后台服务在线（pid ${service.pid}），本进程不连网关。用 /qq status 查看`, "info");
@@ -419,7 +424,7 @@ export default function createExtension(pi) {
 					return;
 				case "new": {
 					const svc = readServiceState(serviceStatePath(baseDir()));
-					if (svc && isServiceAlive(svc)) {
+					if (svc && isServiceAlive(svc) && !isServiceProcess(svc)) {
 						notify("后台服务在线：QQ 会话由服务管理，请在 QQ 里发 /qq new；终端 /new 只切本地 TUI", "warning");
 						return;
 					}
