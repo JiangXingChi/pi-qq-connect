@@ -646,8 +646,25 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 	assert.equal(ctx.newSessions.length, 0, "服务在线时终端 /qq new 不应切换本地会话");
 	assert.ok(ctx.notifications.some((n) => /QQ 里发 \/qq new/.test(n.message)));
 
-	// 服务进程自己执行 /qq new 时必须放行（QQ 侧的 /qq new 就是走到这里）
+	// 环境变量被工具子进程继承、但 ppid 不对：仍按 TUI 处理，不许借服务身份绕过
+	const beforeSpoof = ctx.newSessions.length;
 	process.env.QQBOT_SERVICE_PID = String(process.pid);
+	try {
+		await fake.commands.get("qq").handler("new", ctx);
+		assert.equal(ctx.newSessions.length, beforeSpoof, "只有 ppid 对得上的服务进程才放行");
+	} finally {
+		delete process.env.QQBOT_SERVICE_PID;
+	}
+
+	// 服务进程自己执行 /qq new 时必须放行（QQ 侧的 /qq new 就是走到这里）。
+	// 真实的父子关系：状态文件 pid 是启动器，pi 子进程的 ppid 就是它。
+	writeServiceState(serviceFile, {
+		pid: process.ppid,
+		startedAt: new Date().toISOString(),
+		heartbeatAt: new Date().toISOString(),
+		sessionId: "pi-qqbot-service",
+	});
+	process.env.QQBOT_SERVICE_PID = String(process.ppid);
 	try {
 		await fake.commands.get("qq").handler("new", ctx);
 		assert.equal(ctx.newSessions.length, 1, "服务进程自己的 /qq new 应切换会话");

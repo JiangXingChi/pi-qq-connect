@@ -51,6 +51,20 @@ QQ 里发 `/qq new`：桥拦截，不注入模型，改用
 `ExtensionCommandContext` 调 `ctx.newSession()`。`session_shutdown(reason="new")` /
 `session_start(reason="new")` 时插件不重建网关、不释放锁；桥清空旧队列并回执。
 
+## 进程角色
+
+同一份代码会在三种角色里运行，判断错了就会出现「服务在跑但 CLI 也连网关」或「QQ 里
+`/qq new` 被当成终端命令拒绝」：
+
+| 角色 | 识别方式 | 行为 |
+|---|---|---|
+| 普通 TUI（无服务） | 状态文件不存在/心跳过期 | 连网关、持锁 |
+| TUI 控制面（服务在线） | 状态文件健康，且不是服务进程 | 不连网关、不抢锁，只执行 `/qq status/start/stop` |
+| 后台服务进程 | `QQBOT_SERVICE_PID === 状态文件 pid` **且** `ppid === 状态文件 pid` | 连网关；`/qq new` 放行 |
+
+只比对环境变量不够：服务里的工具子进程会继承它，孙进程会被误认成服务。`ppid` 检查
+把范围限定在启动器直接拉起的那一个 `pi` 子进程。
+
 ## 后台服务
 
 `/qq start` 让当前进程先让出网关和锁，再 detached 拉起 `bin/pi-qqbot.mjs`，它执行
@@ -77,6 +91,6 @@ QQ 里发 `/qq new`：桥拦截，不注入模型，改用
 
 ## 测试
 
-- `npm test`：38 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传。
+- `npm test`：39 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传。
 - `npm run e2e`：真 `pi --mode rpc` + mock QQ，调一次模型。
 - `npm run e2e:service` / `e2e:service-cmd`：后台服务生命周期与 `/qq start|stop`。

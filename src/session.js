@@ -12,6 +12,10 @@ import { randomInt } from "node:crypto";
 import { parseFileMarkers, uploadFile } from "./media.js";
 import { buildPrompt, chatKey, chunkText, isAllowed, maskId, replyTarget, stripMarkdown } from "./text.js";
 
+function logChat(item) {
+	return `${item.kind}:${maskId(item.chatId)}`;
+}
+
 function messageText(message) {
 	const content = message?.content;
 	if (typeof content === "string") return content;
@@ -169,12 +173,12 @@ export class QqBridge {
 		}
 		if (!isAllowed(item, this.cfg)) {
 			this.stats.ignored++;
-			this.log.warn(`未授权来源 ${chatKey(item)}（kind=${item.kind} user=${maskId(item.userId)}），忽略`);
+			this.log.warn(`未授权来源 ${logChat(item)}（kind=${item.kind} user=${maskId(item.userId)}），忽略`);
 			return { accepted: false, reason: "未授权" };
 		}
 		if (this.queue.length >= this.cfg.maxQueue) {
 			this.stats.ignored++;
-			this.log.warn(`队列已满（${this.cfg.maxQueue}），丢弃来自 ${chatKey(item)} 的消息`);
+			this.log.warn(`队列已满（${this.cfg.maxQueue}），丢弃来自 ${logChat(item)} 的消息`);
 			return { accepted: false, reason: "队列已满" };
 		}
 		this.seen.set(item.msgId, Date.now());
@@ -351,6 +355,8 @@ export class QqBridge {
 		this.ackTimer = setTimeout(() => {
 			this.ackTimer = undefined;
 			if (this.inflight !== inflight || inflight.ackSent) return;
+			// 额度只剩 1 次时别把唯一的机会用在回执上，否则正文必然发不出去
+			if (inflight.attemptsLeft <= 1) return;
 			inflight.ackSent = true;
 			inflight.attemptsLeft--;
 			const seq = this.#nextSeq(inflight);
@@ -487,7 +493,7 @@ export class QqBridge {
 		const body = markdown ? parsed.text.trim() : stripMarkdown(parsed.text);
 
 		// 额度要给文件留位置：单聊总共 4 次，1 段文字 + 3 个文件正好用完。
-		const reserveAck = this.cfg.ackAfterMs > 0 && !inflight.ackSent ? 1 : 0;
+		const reserveAck = this.cfg.ackAfterMs > 0 && !inflight.ackSent && inflight.attemptsLeft > 1 ? 1 : 0;
 		const available = Math.max(0, inflight.attemptsLeft - reserveAck);
 		const wantText = body.length > 0 || parsed.files.length === 0;
 		const filesToSend = parsed.files.slice(0, Math.max(0, Math.min(parsed.files.length, available - (wantText ? 1 : 0))));
@@ -542,7 +548,7 @@ export class QqBridge {
 				break;
 			}
 		}
-		this.log.info(`已回复 ${sent}/${chunks.length} 段到 ${chatKey(item)}`);
+		this.log.info(`已回复 ${sent}/${chunks.length} 段到 ${logChat(item)}`);
 
 		if (filesToSend.length > 0 && !this.stopped) {
 			const target = replyTarget(item);
@@ -564,7 +570,7 @@ export class QqBridge {
 					);
 					sentFiles++;
 					this.stats.sent++;
-					this.log.info(`已发送文件 ${uploaded.name} 到 ${chatKey(item)}`);
+					this.log.info(`已发送文件 ${uploaded.name} 到 ${logChat(item)}`);
 				} catch (err) {
 					this.stats.failed++;
 					this.log.error(`文件发送失败 ${file}：${err?.message ?? err}`);
@@ -576,7 +582,7 @@ export class QqBridge {
 					this.api.sendText(target, "文件发送失败，请查看 Pi 终端日志", { msgId, msgSeq: seq }),
 				).catch((err) => this.log.warn(`文件失败兜底也没发出去：${err?.message ?? err}`));
 			}
-			this.log.info(`已发送文件 ${sentFiles}/${filesToSend.length} 个到 ${chatKey(item)}`);
+			this.log.info(`已发送文件 ${sentFiles}/${filesToSend.length} 个到 ${logChat(item)}`);
 		}
 	}
 }

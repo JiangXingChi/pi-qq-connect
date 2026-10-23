@@ -103,6 +103,28 @@ test("上传：预上传 → 分片 PUT → 确认 → 合并 → 富媒体发�
 	}
 });
 
+test("API 错误信息里的 openid 会打码", async () => {
+	const mock = await startMockQq();
+	const api = new QqApi({
+		auth: { getToken: async () => "t", invalidate() {} },
+		endpoints: { api: mock.base },
+		log: silentLog,
+	});
+	try {
+		mock.state.failNextSend = { status: 400, body: { code: 40054, message: "mock failure" } };
+		await assert.rejects(
+			() => api.sendText({ type: "private", openid: "448243F5CDC029CBA3FD9BC9C0340D62" }, "x", { msgId: "m", msgSeq: 1 }),
+			(err) => {
+				assert.ok(!err.message.includes("448243F5CDC029CBA3FD9BC9C0340D62"), "不能泄漏完整 openid");
+				assert.match(err.message, /448243…0D62/);
+				return true;
+			},
+		);
+	} finally {
+		await mock.stop();
+	}
+});
+
 test("上传：网络/5xx 重试，4xx 不重试", async () => {
 	const dir = await fs.promises.mkdtemp(path.join(process.cwd(), "test", "tmp-retry-media-"));
 	const file = path.join(dir, "a.bin");

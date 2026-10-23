@@ -84,6 +84,9 @@ pi install .
 
 命令共 6 条：`status` / `start` / `stop` / `new` / `log` / `take`。
 
+后台服务在线时，终端里的 `/qq new` 不会切 QQ 会话（会提示你在 QQ 里发），终端 `/new`
+也只切本地 TUI；QQ 会话由服务进程管理。
+
 QQ 侧只认一个命令：`/qq new`（可选带名字）。其余内容都当普通任务交给 Pi。
 `/qq new` 会中止当前正在跑的那一轮并清空待处理队列，因为新会话不会再接收旧会话的输出。
 
@@ -183,7 +186,7 @@ systemctl --user enable --now pi-qqbot
 ## 开发
 
 ```bash
-npm test                  # 38 项单测 + mock QQ
+npm test                  # 39 项单测 + mock QQ
 npm run e2e               # 真 pi --mode rpc + mock QQ（会调一次模型）
 npm run e2e:service       # 后台服务进程生命周期
 npm run e2e:service-cmd   # 真 pi 里 /qq start|stop

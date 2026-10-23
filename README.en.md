@@ -43,6 +43,9 @@ openid to `allowUsers` and turn `allowAll` off.
 | `/qq log [n]` | tail the log |
 | `/qq take` | take over the gateway lock (only on lock conflicts) |
 
+When the background service is online, terminal `/qq new` is refused (use it from QQ); terminal
+`/new` only changes the local TUI session. The QQ session belongs to the service process.
+
 ## Limits
 
 - Passive replies only: 4 per message in private chat (60 min window), 5 per message in groups

@@ -27,7 +27,7 @@ pi install .
 ## 测试
 
 ```bash
-npm test                  # 38 项：配置、文本、分片、预算、额度、去重、锁、服务、媒体上传
+npm test                  # 39 项：配置、文本、分片、预算、额度、去重、锁、服务、媒体上传
 npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
 npm run e2e:service       # 后台服务进程生命周期，不调模型
 npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop

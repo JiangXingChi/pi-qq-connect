@@ -7,8 +7,8 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 
 ## 当前状态（开发副本，2026-10-22）
 
-- 版本 `0.2.2`，Node ≥ 22.19，零运行时依赖。
-- 验证：`npm test` 38 项全过；`npm run e2e` / `e2e:service` / `e2e:service-cmd` 三组真 pi 端到端全过。
+- 版本 `0.2.3`，Node ≥ 22.19，零运行时依赖。
+- 验证：`npm test` 39 项全过；`npm run e2e` / `e2e:service` / `e2e:service-cmd` 三组真 pi 端到端全过。
 - 已实现：
   - QQ 私聊 + 群 @ 消息接入当前 Pi 会话，回答按被动回复发回
   - 串行队列、msg_id 去重、被动窗口兜底、回复额度（`replyQuota`）
@@ -223,6 +223,17 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 | `/qq reconnect` / `/qq fresh` | — | 删除，网关自动重连；极端情况重启服务 |
 | `/qq take` | `/qq take` | 保留并写进帮助，标注“仅锁冲突时用”（不藏着） |
 
+## 角色矩阵审改（0.2.3）
+
+「服务进程 vs TUI 控制面」单独做一轮：
+
+- 列出三种角色与判定条件，写进 `docs/ARCHITECTURE.md`；
+- 角色判断加 `ppid === 状态文件 pid`，防止 `QQBOT_SERVICE_PID` 被服务里的工具子进程继承后，
+  孙进程被误认成服务；
+- 单测覆盖：TUI 控制面拒绝 `/qq new`、服务进程放行、伪造环境变量但 ppid 不对仍拒绝；
+- `/qq start` 在服务已在线时先 `stop()` 本地网关；`/qq take` 只有 `state.gateway` 存在才报成功；
+- 额度只剩 1 次时跳过回执。
+
 ## 修复：QQ 侧 /qq new 被误伤（0.2.2）
 
 0.2.1 给终端 `/qq new` 加了「服务在线就拒绝」的保护，但 QQ 侧的 `/qq new` 也是通过
@@ -243,7 +254,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 7. **启动器状态版本硬编码 0.1.0**：改为读 `package.json`（现 0.2.1）。
 8. **工程细节**：`install.sh` 检测到 `pi install` 已安装时拒绝重复软链；CI 增加 `npm pack` 白名单检查；清理未使用的 import/变量。
 
-验证：38 项单测、`e2e`、`e2e:service`、`e2e:service-cmd` 全过；真 pi 加载新路径 `/qq help`、服务在线提示正常；沙箱网关重启后 READY。
+验证：39 项单测、`e2e`、`e2e:service`、`e2e:service-cmd` 全过；真 pi 加载新路径 `/qq help`、服务在线提示正常；沙箱网关重启后 READY。
 
 ## 第九轮：工程化重构（GitHub / npm 发布）
 

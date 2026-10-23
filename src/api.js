@@ -7,6 +7,8 @@
  * msg_id 来自入站事件 d.id；同一 (msg_id, msg_seq) 重复发送会被拒绝，所以 seq 必须在同一 msg_id 下唯一。
  */
 
+import { maskId } from "./text.js";
+
 const PROD_BASE = "https://api.bot.qq.com";
 const SANDBOX_BASE = "https://sandbox.api.sgroup.qq.com";
 const TIMEOUT_MS = 15_000;
@@ -178,7 +180,9 @@ export class QqApi {
 			const detail = [json?.message || json?.raw || res.statusText, code !== undefined ? `err_code ${code}` : "", traceId ? `trace ${traceId}` : ""]
 				.filter(Boolean)
 				.join(" · ");
-			const err = new QqApiError(`${method} ${path} 失败（HTTP ${res.status}）：${detail}`, {
+			// 路径里的 openid 要打码，错误日志不能泄漏完整用户/群 ID
+			const safePath = path.replace(/\/(users|groups)\/([^/]+)/g, (_, kind, id) => `/${kind}/${maskId(id)}`);
+			const err = new QqApiError(`${method} ${safePath} 失败（HTTP ${res.status}）：${detail}`, {
 				status: res.status,
 				code,
 				traceId,

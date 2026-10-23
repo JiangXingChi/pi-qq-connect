@@ -106,10 +106,16 @@ export default function createExtension(pi) {
 		}
 	}
 
-	/** 当前进程是不是状态文件里那个后台服务（bin 会注入 QQBOT_SERVICE_PID）。 */
+	/**
+	 * 当前进程是不是状态文件里那个后台服务（bin 会注入 QQBOT_SERVICE_PID）。
+	 * 同时检查 ppid：这个环境变量会被服务里的工具子进程继承，只看 pid 会把孙进程也当成服务。
+	 */
 	function isServiceProcess(service) {
 		return Boolean(
-			process.env.QQBOT_SERVICE_PID && service && String(service.pid) === process.env.QQBOT_SERVICE_PID,
+			process.env.QQBOT_SERVICE_PID &&
+				service &&
+				String(service.pid) === process.env.QQBOT_SERVICE_PID &&
+				process.ppid === service.pid,
 		);
 	}
 
@@ -336,6 +342,9 @@ export default function createExtension(pi) {
 		const file = serviceStatePath(baseDir());
 		const svc = readServiceState(file);
 		if (svc && isServiceAlive(svc)) {
+			// 极端情况下本地还连着网关（例如服务是外部启动的）：先让出，确保只有一条连接
+			stop();
+			setStatus("服务在线", `pid ${svc.pid}`);
 			notify(`后台服务已在运行：${describeService(svc)}`, "info");
 			return;
 		}
@@ -451,7 +460,8 @@ export default function createExtension(pi) {
 						return;
 					}
 					await start(ctx);
-					notify("已接管网关锁并启动本地网关", "info");
+					if (state.gateway) notify("已接管网关锁并启动本地网关", "info");
+					else notify(`已接管锁，但没能连接：${state.error ?? "查看 /qq log"}`, "warning");
 					return;
 				}
 				default:
