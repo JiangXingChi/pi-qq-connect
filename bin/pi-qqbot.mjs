@@ -147,8 +147,9 @@ process.on("exit", () => removeServiceState(stateFile));
 const existing = readServiceState(stateFile);
 if (existing && existing.pid !== process.pid && isServiceAlive(existing)) {
 	console.error(`[pi-qqbot] 已有后台服务在运行（pid ${existing.pid}），本进程退出`);
-	// 干净退出：systemd Restart=on-failure 不会每 5 秒反复拉起这个注定失败的实例
-	process.exit(0);
+	// systemd 下让它可见地失败（配合 StartLimitBurst=3），否则 unit 看起来是 inactive；
+	// 手动 /qq start 的场景则干净退出，避免父进程误判。
+	process.exit(process.env.INVOCATION_ID ? 1 : 0);
 }
 
 beat();

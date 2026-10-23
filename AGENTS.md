@@ -36,7 +36,7 @@
 ## 命令
 
 ```bash
-npm test                  # 42 项单测 + mock 平台集成，几秒
+npm test                  # 45 项单测 + mock 平台集成，几秒
 npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
 npm run e2e:service       # 后台服务进程，不调模型
 npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop，不调模型
@@ -84,7 +84,7 @@ pi --extension ~/Agent/Temp/pi-qqbot-dev        # 用开发副本启动，不碰
 
 ## 完成标准
 
-- `npm test` 全过（当前 42 项），无挂起、无未捕获 rejection。
+- `npm test` 全过（当前 45 项），无挂起、无未捕获 rejection。
 - 触及协议/网关/发送/会话切换时：`npm run e2e` 通过（pong → `/qq new` → 新会话继续对话）。
 - 触及服务模式时：`npm run e2e:service` 与 `e2e:service-cmd` 通过。
 - `./scripts/publish-to-core.sh` 预览里的差异与本次改动一致，没有意外删除。

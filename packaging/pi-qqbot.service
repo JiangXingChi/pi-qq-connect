@@ -1,5 +1,7 @@
 [Unit]
 Description=pi-qqbot — QQ 官方机器人接入 Pi 会话
+StartLimitIntervalSec=60
+StartLimitBurst=3
 # 用户级服务：配合 `loginctl enable-linger <user>` 在开机时启动。
 # 不用 network-online.target：用户管理器里通常没有这个 target；
 # 网络没就绪也没关系，网关会自己退避重连。

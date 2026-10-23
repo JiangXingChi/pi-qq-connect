@@ -185,11 +185,12 @@ export class QqGateway {
 			return;
 		}
 		this.ws = ws;
+		// 从 new WebSocket 就开始计时：只等 open 的话，Upgrade 挂起会永远 connecting
+		this.#armHandshake(ws);
 		this.log?.info(`连接网关 ${url}`);
 
 		ws.addEventListener("open", () => {
 			this.openedAt = Date.now();
-			this.#armHandshake(ws);
 			this.log?.info("网关连接已建立，等待 Hello");
 		});
 		ws.addEventListener("message", (event) => {
@@ -339,6 +340,8 @@ export class QqGateway {
 	}
 
 	async #sendIdentify() {
+		const ws = this.ws;
+		const generation = this.openGeneration;
 		let token;
 		try {
 			token = await this.auth.getToken();
@@ -347,6 +350,7 @@ export class QqGateway {
 			this.#softReconnect(); // 不关 socket 会一直干等，等下一次重连再试
 			return;
 		}
+		if (!ws || this.ws !== ws || this.openGeneration !== generation) return;
 		this.#send({
 			op: OP_IDENTIFY,
 			d: {
@@ -354,11 +358,13 @@ export class QqGateway {
 				intents: this.intents,
 				shard: [0, 1],
 				properties: { $os: process.platform, $browser: "pi-qqbot", $device: "pi-qqbot" },
-			},
-		});
-	}
+				},
+				}, ws);
+				}
 
 	async #sendResume() {
+		const ws = this.ws;
+		const generation = this.openGeneration;
 		let token;
 		try {
 			token = await this.auth.getToken();
@@ -367,10 +373,11 @@ export class QqGateway {
 			this.#softReconnect();
 			return;
 		}
+		if (!ws || this.ws !== ws || this.openGeneration !== generation) return;
 		this.#send({
 			op: OP_RESUME,
 			d: { token: `QQBot ${token}`, session_id: this.sessionId, seq: this.lastSeq },
-		});
+		}, ws);
 	}
 
 	#onDispatch(payload) {
@@ -400,8 +407,7 @@ export class QqGateway {
 		}
 	}
 
-	#send(payload) {
-		const ws = this.ws;
+	#send(payload, ws = this.ws) {
 		if (!ws) return;
 		try {
 			ws.send(JSON.stringify(payload));

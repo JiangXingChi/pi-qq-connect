@@ -125,9 +125,20 @@ export function normalizeConfig(raw = {}) {
 	cfg.files.enabled = boolIn(cfg.files.enabled, true);
 	cfg.files.maxCount = intIn(cfg.files.maxCount, 3, 0, 3);
 	cfg.files.maxBytes = intIn(cfg.files.maxBytes, DEFAULT_CONFIG.files.maxBytes, 1024, 200 * 1024 * 1024);
-	// 字符串误写成单个目录时按一个白名单处理；绝不能让类型错误退化成“不限制”
-	if (typeof cfg.files.allowDirs === "string") cfg.files.allowDirs = [cfg.files.allowDirs];
-	else cfg.files.allowDirs = strList(cfg.files.allowDirs);
+	// 类型错误必须 fail-closed：绝不能让 allowDirs 退化成“不限制”
+	const rawDirs = cfg.files.allowDirs;
+	if (typeof rawDirs === "string") {
+		cfg.files.allowDirs = rawDirs.split(",").map((d) => d.trim()).filter(Boolean);
+	} else if (Array.isArray(rawDirs)) {
+		const dirs = strList(rawDirs);
+		if (rawDirs.some((d) => typeof d !== "string" || !d.trim())) cfg.files.enabled = false;
+		cfg.files.allowDirs = dirs;
+	} else if (rawDirs !== undefined) {
+		cfg.files.enabled = false;
+		cfg.files.allowDirs = [];
+	} else {
+		cfg.files.allowDirs = [];
+	}
 	cfg.lock = boolIn(raw.lock, true);
 	cfg.log = mergeSection(DEFAULT_CONFIG.log, cfg.log);
 	if (!LEVELS.has(cfg.log.level)) cfg.log.level = "info";

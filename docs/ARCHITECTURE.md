@@ -91,6 +91,6 @@ QQ 里发 `/qq new`：桥拦截，不注入模型，改用
 
 ## 测试
 
-- `npm test`：42 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传。
+- `npm test`：45 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传。
 - `npm run e2e`：真 `pi --mode rpc` + mock QQ，调一次模型。
 - `npm run e2e:service` / `e2e:service-cmd`：后台服务生命周期与 `/qq start|stop`。

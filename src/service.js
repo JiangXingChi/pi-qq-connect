@@ -103,7 +103,13 @@ export function startService({ binPath, baseDir, cwd, sessionId = "pi-qqbot-serv
 			env: { ...process.env },
 		});
 		// spawn 的失败是异步 error 事件；没有监听器会直接打崩调用方（TUI）
-		child.on("error", () => {});
+		child.on("error", (err) => {
+			try {
+				fs.appendFileSync(logFile, `[pi-qqbot] spawn 失败：${err?.message ?? err}\n`);
+			} catch {
+				// ignore
+			}
+		});
 		child.unref();
 		return { pid: child.pid ?? null, logFile };
 	} catch (err) {

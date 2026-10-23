@@ -13,6 +13,16 @@ import { startMockQq } from "./mock-qq.mjs";
 
 const silentLog = { debug() {}, info() {}, warn() {}, error() {} };
 
+/** 模拟真实 Pi：注入后先发 before_agent_start。 */
+function startTurn(bridge, fake) {
+	bridge.onAgentStart();
+	const content = fake.sent.at(-1)?.content;
+	const prompt = typeof content === "string"
+		? content
+		: (Array.isArray(content) ? content.find((part) => part?.type === "text")?.text : "") ?? "";
+	bridge.onBeforeAgentStart({ type: "before_agent_start", messageType: "user", prompt });
+}
+
 test("文件标记：解析、去重、跳过相对路径", () => {
 	const parsed = parseFileMarkers("图\n[[file:/tmp/a.png]]\n[[file:/tmp/a.png]]\n[[file:~/b.txt]]\n[[file:rel.txt]]", {
 		maxCount: 3,
@@ -35,6 +45,19 @@ test("文件标记：代码围栏里的示例不发送", () => {
 	assert.deepEqual(parsed.files, ["/tmp/real.png"]);
 	assert.match(parsed.text, /example\.png/);
 	assert.doesNotMatch(parsed.text, /real\.png/);
+});
+
+test("文件标记：~~~ 围栏、四反引号与行内标记", () => {
+	const tilde = parseFileMarkers("~~~\n[[file:/tmp/tilde.png]]\n~~~\n[[file:/tmp/real.png]]");
+	assert.deepEqual(tilde.files, ["/tmp/real.png"]);
+
+	const nested = parseFileMarkers("````\n```\n[[file:/tmp/nested.png]]\n```\n````\n[[file:/tmp/real2.png]]");
+	assert.deepEqual(nested.files, ["/tmp/real2.png"]);
+
+	const inline = parseFileMarkers("文件在这：[[file:/tmp/inline.png]]");
+	assert.deepEqual(inline.files, []);
+	assert.doesNotMatch(inline.text, /\[\[file:/);
+	assert.equal(inline.skipped.length, 1);
 });
 
 test("文件校验：拒绝敏感路径与空文件", async () => {
@@ -226,7 +249,7 @@ test("桥：长文本 + 3 个文件时给文件留额度", async () => {
 			text: "画图", attachments: [], receivedAt: Date.now(),
 		});
 		await waitFor(() => fake.sent.length === 1);
-		bridge.onAgentStart();
+		startTurn(bridge, fake);
 		const text = `很长的回答${"啊".repeat(500)}\n` + files.map((f) => `[[file:${f}]]`).join("\n");
 		bridge.onMessageEnd({ role: "assistant", content: text });
 		bridge.onAgentSettled(false);
@@ -277,7 +300,7 @@ test("桥：[[file:...]] 会被摘掉并作为富媒体发送", async () => {
 			receivedAt: Date.now(),
 		});
 		await waitFor(() => fake.sent.length === 1, { label: "注入" });
-		bridge.onAgentStart();
+		startTurn(bridge, fake);
 		bridge.onMessageEnd({ role: "assistant", content: `给你：\n[[file:${file}]]` });
 		bridge.onAgentSettled(false);
 		await waitFor(() => media.length === 1, { label: "媒体发送" });

@@ -171,13 +171,13 @@ export default function createExtension(pi) {
 		state.newSessionTimer.unref?.();
 	}
 
-	async function start(ctx) {
+	async function start(ctx, { keepLock = false } = {}) {
 		if (state.starting) return;
 		state.starting = true;
 		state.ctx = ctx ?? state.ctx;
 		try {
-			// 自己先让出网关和锁；后面早退（未配置/被服务接管/锁被占）时不会留下悬空锁
-			stop();
+			// 自己先让出网关和锁；/qq take 传 keepLock 时保留刚强占的锁
+			stop({ release: !keepLock });
 			state.error = null;
 			state.lastInbound = undefined;
 
@@ -473,7 +473,7 @@ export default function createExtension(pi) {
 						notify("接管失败", "warning");
 						return;
 					}
-					await start(ctx);
+					await start(ctx, { keepLock: true });
 					if (state.gateway) notify("已接管网关锁并启动本地网关", "info");
 					else notify(`已接管锁，但没能连接：${state.error ?? "查看 /qq log"}`, "warning");
 					return;

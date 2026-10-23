@@ -77,6 +77,7 @@ export class QqBridge {
 		this.seen = new Map();
 		this.lastByChat = new Map();
 		this.pendingNew = undefined;
+		this.deferred = [];
 		this.generation = 0;
 		this.retryTimer = undefined;
 		this.ackTimer = undefined;
@@ -99,6 +100,7 @@ export class QqBridge {
 		this.#clearTimers();
 		this.#stopTyping(this.inflight);
 		this.queue = [];
+		this.deferred = [];
 		this.inflight = undefined;
 		this.running = false;
 		this.injecting = false;
@@ -107,18 +109,26 @@ export class QqBridge {
 	/** 新会话就绪：回执并清空旧状态。 */
 	async onSessionSwitched() {
 		const pending = this.pendingNew;
+		const deferred = this.deferred;
 		this.pendingNew = undefined;
+		this.deferred = [];
 		this.reset();
-		if (!pending) return;
-		const temp = { seqs: new Set(), attemptsLeft: 1 };
-		try {
-			await this.api.sendText(replyTarget(pending.item), "✅ 已开新会话", {
-				msgId: pending.item.msgId,
-				msgSeq: this.#nextSeq(temp),
-			});
-			this.stats.sent++;
-		} catch (err) {
-			this.log.warn(`新会话回执发送失败：${err?.message ?? err}`);
+		if (pending) {
+			const temp = { seqs: new Set(), attemptsLeft: 1 };
+			try {
+				await this.api.sendText(replyTarget(pending.item), "✅ 已开新会话", {
+					msgId: pending.item.msgId,
+					msgSeq: this.#nextSeq(temp),
+				});
+				this.stats.sent++;
+			} catch (err) {
+				this.log.warn(`新会话回执发送失败：${err?.message ?? err}`);
+			}
+		}
+		if (deferred.length > 0) {
+			this.queue.push(...deferred);
+			this.log.info(`会话切换完成，恢复暂存的 ${deferred.length} 条消息`);
+			void this.pump();
 		}
 	}
 
@@ -129,7 +139,13 @@ export class QqBridge {
 	/** /qq new 失败：TUI 通知 + 尽力给 QQ 回一条失败提示。 */
 	notifyNewSessionFailed(reason) {
 		const pending = this.pendingNew;
+		const deferred = this.deferred;
 		this.pendingNew = undefined;
+		this.deferred = [];
+		if (deferred.length > 0) {
+			this.queue.push(...deferred);
+			void this.pump();
+		}
 		if (!pending) return;
 		this.log.warn(`开新会话失败：${reason}`);
 		this.notify(`开新会话失败：${reason}`, "warning");
@@ -205,6 +221,14 @@ export class QqBridge {
 		this.lastByChat.set(chatKey(item), { msgId: item.msgId, at: item.receivedAt });
 
 		// QQ 侧 /qq new：不注入模型，交给 Pi 的扩展命令开新会话
+		// 正在切换会话：新消息留在暂存区，等 session_start(new) 后放回队列，避免被 reset 清掉
+		if (this.pendingNew) {
+			this.deferred.push(item);
+			this.stats.received++;
+			this.log.info(`会话切换中，暂存消息 chat=${maskId(item.chatId)}（${this.deferred.length} 条）`);
+			return { accepted: true, deferred: true };
+		}
+
 		const command = /^\/qq\s+new(?:\s+(.*))?$/i.exec(item.text.trim());
 		if (command && typeof this.onNewSession === "function") {
 			this.log.info(`收到 /qq new（chat=${maskId(item.chatId)}）`);
@@ -253,7 +277,7 @@ export class QqBridge {
 	}
 
 	onMessageEnd(message) {
-		if (!this.inflight || this.inflight.foreign || message?.role !== "assistant") return;
+		if (!this.inflight || this.inflight.foreign || !this.inflight.started || message?.role !== "assistant") return;
 		const text = messageText(message).trim();
 		if (!text) return;
 		this.inflight.texts.push(text);
@@ -261,14 +285,24 @@ export class QqBridge {
 
 	onAgentSettled(aborted = false) {
 		this.running = false;
+		const inflight = this.inflight;
+		if (!inflight) {
+			if (this.injectTimer) {
+				clearTimeout(this.injectTimer);
+				this.injectTimer = undefined;
+			}
+			void this.pump();
+			return;
+		}
+		if (!inflight.started) {
+			// 这一轮不是我们注入的消息触发的：不要收它的输出，也不要清看门狗
+			this.log.warn("本轮不是 QQ 请求触发的，跳过收集");
+			void this.pump();
+			return;
+		}
 		if (this.injectTimer) {
 			clearTimeout(this.injectTimer);
 			this.injectTimer = undefined;
-		}
-		const inflight = this.inflight;
-		if (!inflight) {
-			void this.pump();
-			return;
 		}
 		if (aborted && inflight.texts.length === 0) {
 			this.log.warn("本轮被中止且没有输出，跳过回复");
@@ -395,6 +429,12 @@ export class QqBridge {
 		this.injectTimer = setTimeout(() => {
 			this.injectTimer = undefined;
 			if (this.inflight !== inflight || inflight.started || this.stopped) return;
+			if (this.running) {
+				// 另一个轮次在跑，可能只是 before_agent_start 被延迟；等它结束再看，别重复注入
+				this.log.warn(`注入后 ${this.injectTimeoutMs}ms 仍未开始，但 Pi 正在忙，延后判定`);
+				this.#armInjectWatchdog(inflight);
+				return;
+			}
 			this.log.warn(`注入后 ${this.injectTimeoutMs}ms 没有开始执行，判定注入失败`);
 			this.#clearAckTimer();
 			this.#stopTyping(inflight);
@@ -494,17 +534,26 @@ export class QqBridge {
 		if (inflight.attemptsLeft <= 0) {
 			throw new Error(`被动回复额度已用完（每条消息最多 ${inflight.quotaMax} 次）`);
 		}
-		// 一条逻辑消息只扣一次额度；重试不额外占用户可见的回复次数
-		inflight.attemptsLeft--;
 		const seq = this.#nextSeq(inflight);
+		let charged = false;
+		const charge = () => {
+			if (charged) return;
+			charged = true;
+			inflight.attemptsLeft--;
+		};
 		let lastError;
 		for (let attempt = 0; attempt < attempts; attempt++) {
 			try {
-				return await send(seq);
+				const result = await send(seq);
+				charge();
+				return result;
 			} catch (err) {
 				lastError = err;
 				// 40054005：同一 msg_id+msg_seq 已发过，说明上一次其实成功
-				if (Number(err?.code) === 40054005) return undefined;
+				if (Number(err?.code) === 40054005) {
+					charge();
+					return undefined;
+				}
 				if (this.#isPermanentSendError(err)) break;
 				if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
 			}

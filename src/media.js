@@ -27,6 +27,14 @@ const DENY = [
 	/\/\.pi\/agent\//,
 	/\/\.local\/share\/keyrings\//,
 	/(^|\/)\.env(\.|$)/i,
+	/(^|\/)\.bash_history$/i,
+	/(^|\/)\.zsh_history$/i,
+	/(^|\/)\.python_history$/i,
+	/(^|\/)\.pypirc$/i,
+	/(^|\/)\.pgpass$/i,
+	/(^|\/)\.my\.cnf$/i,
+	/(^|\/)\.vault-token$/i,
+	/(^|\/)\.gem\/credentials$/i,
 	/(^|\/)\.netrc$/i,
 	/(^|\/)\.npmrc$/i,
 	/(^|\/)\.git-credentials$/i,
@@ -53,21 +61,29 @@ export function parseFileMarkers(text, { maxCount = 3 } = {}) {
 	const files = [];
 	const skipped = [];
 	const kept = [];
-	let inFence = false;
+	let fence = null;
 	// 只认围栏外、独占一行的标记：避免把示例/代码块里的 [[file:...]] 真的发出去
 	for (const line of source.split("\n")) {
-		if (/^\s*```/.test(line)) {
-			inFence = !inFence;
+		const fenceMark = /^\s*(`{3,}|~{3,})/.exec(line);
+		if (fenceMark) {
+			const mark = fenceMark[1];
+			if (!fence) fence = { char: mark[0], len: mark.length };
+			else if (mark[0] === fence.char && mark.length >= fence.len) fence = null;
 			kept.push(line);
 			continue;
 		}
-		if (inFence) {
+		if (fence) {
 			kept.push(line);
 			continue;
 		}
 		const match = /^\s*\[\[file:\s*([^\]\n]+?)\s*\]\]\s*$/i.exec(line);
 		if (!match) {
-			kept.push(line);
+			if (/\[\[file:/i.test(line)) {
+				skipped.push("文件标记必须独占一行，已忽略");
+				kept.push(line.replace(/\[\[file:[^\]]*\]\]/gi, "").trimEnd());
+			} else {
+				kept.push(line);
+			}
 			continue;
 		}
 		const raw = expandHome(match[1].trim().replace(/^["'`]|["'`]$/g, ""));
@@ -215,7 +231,9 @@ export async function uploadFile(api, target, filePath, { log, maxBytes, allowDi
 		for (const part of parts) {
 			const block = Number(part.block_size) || Number(prep.block_size);
 			if (!Number.isFinite(block) || block <= 0) throw new Error("分片大小无效");
-			const length = Math.min(Math.min(block, 16 * 1024 * 1024), info.size - offset);
+			// 不能把 block 夹小后继续按顺序累加，否则分片边界和平台不一致，文件会损坏
+			if (block > 64 * 1024 * 1024) throw new Error(`分片过大：${block} 字节`);
+			const length = Math.min(block, info.size - offset);
 			if (length <= 0) break;
 			const buf = await readSlice(handle, offset, length);
 			if (buf.length !== length) throw new Error(`分片 ${part.index} 读取不完整（${buf.length}/${length} 字节）`);

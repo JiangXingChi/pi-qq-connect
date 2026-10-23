@@ -195,7 +195,7 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 ## 开发
 
 ```bash
-npm test                  # 42 项单测 + mock QQ
+npm test                  # 45 项单测 + mock QQ
 npm run e2e               # 真 pi --mode rpc + mock QQ（会调一次模型）
 npm run e2e:service       # 后台服务进程生命周期
 npm run e2e:service-cmd   # 真 pi 里 /qq start|stop

@@ -22,6 +22,16 @@ import { c2cEvent, groupAtEvent, startMockQq } from "./mock-qq.mjs";
 
 const silentLog = { debug() {}, info() {}, warn() {}, error() {} };
 
+/** 模拟真实 Pi：注入后先发 before_agent_start，桥才会把这一轮认成自己的。 */
+function startTurn(bridge, fake) {
+	bridge.onAgentStart();
+	const content = fake.sent.at(-1)?.content;
+	const prompt = typeof content === "string"
+		? content
+		: (Array.isArray(content) ? content.find((part) => part?.type === "text")?.text : "") ?? "";
+	bridge.onBeforeAgentStart({ type: "before_agent_start", messageType: "user", prompt });
+}
+
 function stubApi({ markdownFails = false, failFirst = 0, failStatus = 500 } = {}) {
 	const sends = [];
 	const attempts = [];
@@ -91,6 +101,15 @@ test("配置：字符串布尔值不再静默反转", () => {
 	assert.equal(cfg.typing, false);
 	const dirs = normalizeConfig({ files: { allowDirs: "/tmp/out" } });
 	assert.deepEqual(dirs.files.allowDirs, ["/tmp/out"]);
+});
+
+test("配置：非法 allowDirs 类型会关闭文件外发", () => {
+	const badObject = normalizeConfig({ files: { enabled: true, allowDirs: { dir: "/tmp" } } });
+	assert.equal(badObject.files.enabled, false);
+	const badItem = normalizeConfig({ files: { enabled: true, allowDirs: ["/tmp", 42] } });
+	assert.equal(badItem.files.enabled, false);
+	const comma = normalizeConfig({ files: { enabled: true, allowDirs: "/tmp, /var/tmp" } });
+	assert.deepEqual(comma.files.allowDirs, ["/tmp", "/var/tmp"]);
 });
 
 test("配置：校验缺凭据与空权限", () => {
@@ -190,7 +209,7 @@ test("桥：注入 → 收集 → 被动回复", async () => {
 	await waitFor(() => fake.sent.length === 1, { label: "注入 Pi" });
 	assert.match(fake.sent[0].content, /你好/);
 
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: [{ type: "text", text: "**回复**内容" }] });
 	bridge.onAgentSettled(false);
 
@@ -209,7 +228,7 @@ test("桥：单聊会发「正在输入」", async () => {
 	await waitFor(() => api.typings.length === 1, { label: "typing" });
 	assert.equal(api.typings[0].target.type, "private");
 	assert.equal(api.typings[0].msgId, "msg-1");
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "好" });
 	bridge.onAgentSettled(false);
 	await waitFor(() => api.sends.length === 1);
@@ -221,7 +240,7 @@ test("桥：发送失败会换新 seq 重试，永久错误不重试", async () 
 	const bridge = new QqBridge({ pi: fake.pi, api, config: normalizeConfig({ allowAll: true }), log: silentLog });
 	bridge.enqueue(privateItem());
 	await waitFor(() => fake.sent.length === 1);
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "答案" });
 	bridge.onAgentSettled(false);
 	await waitFor(() => api.sends.length === 1, { label: "重试成功", timeoutMs: 8000 });
@@ -233,7 +252,7 @@ test("桥：发送失败会换新 seq 重试，永久错误不重试", async () 
 	const bridge2 = new QqBridge({ pi: fake2.pi, api: api2, config: normalizeConfig({ allowAll: true }), log: silentLog });
 	bridge2.enqueue(privateItem());
 	await waitFor(() => fake2.sent.length === 1);
-	bridge2.onAgentStart();
+	startTurn(bridge2, fake2);
 	bridge2.onMessageEnd({ role: "assistant", content: "答案" });
 	bridge2.onAgentSettled(false);
 	await waitFor(() => api2.attempts.length === 1, { label: "永久错误" });
@@ -258,12 +277,12 @@ test("桥：取 token 期间重复 pump 不会丢消息或重复注入", async (
 	assert.equal(bridge.queue.length, 1);
 	assert.match(String(fake.sent[0].content), /第一条/);
 
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "答一" });
 	bridge.onAgentSettled(false);
 	await waitFor(() => fake.sent.length === 2, { label: "第二条注入" });
 	assert.match(String(fake.sent[1].content), /第二条/);
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "答二" });
 	bridge.onAgentSettled(false);
 	await waitFor(() => api.sends.length === 2);
@@ -282,7 +301,7 @@ test("桥：网关离线时先等重连再发", async () => {
 	});
 	bridge.enqueue(privateItem());
 	await waitFor(() => fake.sent.length === 1);
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "答案" });
 	bridge.onAgentSettled(false);
 	await sleep(150);
@@ -302,7 +321,7 @@ test("桥：被动回复额度用完就停", async () => {
 	});
 	bridge.enqueue(privateItem());
 	await waitFor(() => fake.sent.length === 1);
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: Array.from({ length: 8 }, (_, i) => `段落${i}`.repeat(30)).join("\n\n") });
 	bridge.onAgentSettled(false);
 	await waitFor(() => api.sends.length === 2);
@@ -340,7 +359,7 @@ test("桥：换会话后旧队列作废", async () => {
 	const bridge = new QqBridge({ pi: fake.pi, api, config: normalizeConfig({ allowAll: true }), log: silentLog });
 	bridge.enqueue(privateItem({ msgId: "old-1", text: "旧问题" }));
 	await waitFor(() => fake.sent.length === 1);
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "旧答案" });
 	bridge.reset();
 	bridge.onAgentSettled(false);
@@ -404,7 +423,7 @@ test("桥：回复预算截断", async () => {
 	});
 	bridge.enqueue(privateItem());
 	await waitFor(() => fake.sent.length === 1);
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({
 		role: "assistant",
 		content: [{ type: "text", text: Array.from({ length: 6 }, (_, i) => `内容${i}`.repeat(30)).join("\n\n") }],
@@ -435,7 +454,7 @@ test("桥：被动窗口过期后改用同会话最新 msg_id", async () => {
 	await waitFor(() => fake.sent.length === 1);
 	bridge.lastByChat.set("group:group-1", { msgId: "new-msg", at: Date.now() });
 
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "答案" });
 	bridge.onAgentSettled(false);
 	await waitFor(() => api.sends.length === 1);
@@ -450,7 +469,7 @@ test("桥：Markdown 被拒时回退纯文本", async () => {
 
 	bridge.enqueue(privateItem());
 	await waitFor(() => fake.sent.length === 1);
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "**粗体**回复" });
 	bridge.onAgentSettled(false);
 
@@ -468,11 +487,40 @@ test("桥：终端里输入触发的轮次不回复给 QQ", async () => {
 	await waitFor(() => fake.sent.length === 1);
 
 	bridge.onBeforeAgentStart({ type: "before_agent_start", messageType: "user", prompt: "终端里的话" });
-	bridge.onAgentStart();
+	startTurn(bridge, fake);
 	bridge.onMessageEnd({ role: "assistant", content: "终端答案" });
 	bridge.onAgentSettled(false);
 	await sleep(120);
 	assert.equal(api.sends.length, 0);
+});
+
+test("桥：未开始的轮次不会把终端输出回给 QQ", async () => {
+	const fake = createFakePi();
+	const api = stubApi();
+	const bridge = new QqBridge({
+		pi: fake.pi,
+		api,
+		config: normalizeConfig({ allowAll: true }),
+		log: silentLog,
+		injectTimeoutMs: 100,
+	});
+	bridge.enqueue(privateItem());
+	await waitFor(() => fake.sent.length === 1);
+
+	// 模拟：注入还没开始，终端里先跑了一轮并结束
+	bridge.onAgentStart();
+	bridge.onMessageEnd({ role: "assistant", content: "终端答案" });
+	bridge.onAgentSettled(false);
+	await sleep(150);
+	assert.equal(api.sends.length, 0, "不该把别人的输出回给 QQ");
+
+	// 看门狗重新注入后，真正的 QQ 答案才发送
+	await waitFor(() => fake.sent.length === 2, { label: "看门狗重排" });
+	startTurn(bridge, fake);
+	bridge.onMessageEnd({ role: "assistant", content: "QQ 答案" });
+	bridge.onAgentSettled(false);
+	await waitFor(() => api.sends.length === 1);
+	assert.equal(api.sends[0].content, "QQ 答案");
 });
 
 test("桥：流式期间注入失败会重排队", async () => {

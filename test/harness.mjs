@@ -27,6 +27,16 @@ export function createFakePi() {
 		sendUserMessage(content, options) {
 			if (pi.streaming) throw new Error("Cannot send a user message while the agent is streaming");
 			sent.push({ content, options, at: Date.now() });
+			// 真实 Pi 会对注入的消息发 before_agent_start；假 pi 在下一个微任务补上，
+			// 否则桥会一直等不到“轮次开始”，测试会卡在注入看门狗里。
+			const prompt = typeof content === "string"
+				? content
+				: (Array.isArray(content) ? content.find((part) => part?.type === "text")?.text : "") ?? "";
+			queueMicrotask(async () => {
+				for (const fn of handlers.get("before_agent_start") ?? []) {
+					await fn({ messageType: "user", prompt });
+				}
+			});
 		},
 	};
 	return {
