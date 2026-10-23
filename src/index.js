@@ -360,6 +360,15 @@ export default function createExtension(pi) {
 				return;
 			}
 		}
+		// 锁被另一个活进程占着时，服务拉起来也连不上，直接拒绝比"假在线"好
+		const holder = readLock(lockFilePath());
+		if (holder && holder.pid !== process.pid && isProcessAlive(holder.pid)) {
+			notify(
+				`网关锁被 pid ${holder.pid} 持有：先关掉那个进程，或 /qq take 强制接管，再 /qq start`,
+				"warning",
+			);
+			return;
+		}
 		// 本进程先让出网关和锁，交给服务
 		stop();
 		const { pid, logFile: startedLog, error } = startService({

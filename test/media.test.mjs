@@ -25,9 +25,16 @@ test("文件标记：解析、去重、跳过相对路径", () => {
 });
 
 test("文件标记：最多 maxCount 个，多余被忽略", () => {
-	const parsed = parseFileMarkers("[[file:/tmp/1]] [[file:/tmp/2]] [[file:/tmp/3]]", { maxCount: 2 });
+	const parsed = parseFileMarkers("[[file:/tmp/1]]\n[[file:/tmp/2]]\n[[file:/tmp/3]]", { maxCount: 2 });
 	assert.equal(parsed.files.length, 2);
 	assert.equal(parsed.skipped.length, 1);
+});
+
+test("文件标记：代码围栏里的示例不发送", () => {
+	const parsed = parseFileMarkers("```\n[[file:/tmp/example.png]]\n```\n[[file:/tmp/real.png]]");
+	assert.deepEqual(parsed.files, ["/tmp/real.png"]);
+	assert.match(parsed.text, /example\.png/);
+	assert.doesNotMatch(parsed.text, /real\.png/);
 });
 
 test("文件校验：拒绝敏感路径与空文件", async () => {

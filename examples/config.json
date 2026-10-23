@@ -4,9 +4,7 @@
   "clientSecret": "替换成你的AppSecret",
   "sandbox": true,
   "allowAll": false,
-  "allowUsers": [
-    "你的QQ的user_openid（沙箱期可先留空+allowAll=true 试）"
-  ],
+  "allowUsers": [],
   "allowGroups": [],
   "envelope": true,
   "replyFormat": "plain",

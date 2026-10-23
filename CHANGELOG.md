@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.5 — 2026-10-23
+
+审改修复（不新增功能）：
+
+- **注入 watchdog**：Pi 的 `sendUserMessage` 是 fire-and-forget，异步失败不会抛回；5 秒内没等到
+  `before_agent_start` 就判定失败，重排一次并提示，避免队列永久卡死、typing 不停。
+- `pump()` 被打断后补泵；`reset()` 不再清 `finishing`（避免两次投递交错）；重试改用独立
+  `injecting` 标志，不再把正在跑的轮次误标空闲。
+- 回执额度不再预留（`#finish` 已清定时器）；重试复用同一个 `msg_seq`，一条逻辑消息只扣一次额度，
+  `40054005` 视为已送达。
+- 网关加 Hello/READY 15 秒握手超时；心跳连续 3 个周期未 ACK 主动重连。
+- 文件：分片短读直接报错、分片大小夹到 16MB、预上传也重试、业务码 40093001/850027 重试、
+  图片流式下载按 `maxBytes` 截断、`[[file:]]` 只认围栏外独占一行、每个文件重算 `msg_id`。
+- 配置：字符串布尔值不再反转（`"false"` 不再等于开启）、`allowDirs` 写成字符串按单个目录处理、
+  符号链接目录/根目录边界修正；补敏感凭据文件拒绝项。
+- 锁改为 `O_EXCL` 原子创建；`startService` 校验 cwd 并监听 spawn error；启动器 spawn 失败会重试、
+  8 秒不退则 SIGKILL 子进程；已有服务时干净退出（systemd 不再每 5 秒重拉）。
+- `/qq start` 在锁被活进程占用时直接拒绝，不再拉起注定连不上的服务。
+- CI 加 `pipefail` 和必需文件断言；测试 42 项（watchdog、代码围栏标记、字符串布尔、mock 的
+  `(msg_id,msg_seq)` 去重与 4/5 次额度）。
+
 ## 0.2.4 — 2026-10-23
 
 - 开机自启：systemd 用户单元补齐 PATH、固定服务会话、`Restart=on-failure`、`KillMode=mixed`，

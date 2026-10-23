@@ -1,6 +1,6 @@
 {
   "name": "pi-qqbot",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻",
   "type": "module",
   "license": "MIT",
@@ -35,6 +35,7 @@
     "scripts/uninstall.sh",
     "docs/ARCHITECTURE.md",
     "docs/DEVELOPMENT.md",
+    "docs/PLAN.md",
     "README.md",
     "README.en.md",
     "LICENSE",

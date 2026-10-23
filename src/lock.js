@@ -35,13 +35,29 @@ export function acquireLock(file, { force = false, pid = process.pid } = {}) {
 	if (holder && holder.pid !== pid && isProcessAlive(holder.pid) && !force) {
 		return { ok: false, holder };
 	}
-	const payload = { pid, host: os.hostname(), at: new Date().toISOString() };
-	try {
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		fs.writeFileSync(file, JSON.stringify(payload), { mode: 0o600 });
-	} catch {
-		// 锁写不进去时不阻塞使用
-	}
+	const payload = JSON.stringify({ pid, host: os.hostname(), at: new Date().toISOString() });
+	const written = (() => {
+		try {
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			const fd = fs.openSync(file, "wx", 0o600);
+			try {
+				fs.writeFileSync(fd, payload);
+			} finally {
+				fs.closeSync(fd);
+			}
+			return true;
+		} catch (err) {
+			if (err?.code !== "EEXIST") return false;
+			// 已存在：同一 pid 或确认可接管时才覆盖
+			try {
+				fs.writeFileSync(file, payload, { mode: 0o600 });
+				return true;
+			} catch {
+				return false;
+			}
+		}
+	})();
+	if (!written) return { ok: false, error: "无法写入锁文件" };
 	return { ok: true, takenOver: Boolean(holder && holder.pid !== pid && force) };
 }
 

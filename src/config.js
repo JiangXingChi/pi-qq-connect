@@ -32,7 +32,7 @@ export const DEFAULT_CONFIG = Object.freeze({
 	replyPrefix: "",
 	replyFormat: "plain", // plain | markdown
 	maxChunks: 4, // 官方上限 5，留 1 条余量
-	replyQuota: 5, // 发送总次数上限（含回执与重试）；实际按场景取小：单聊 4、群 5
+	replyQuota: 5, // 发送总次数上限（含回执；重试复用 seq 不额外占）；实际按场景取小：单聊 4、群 5
 	chunkChars: 4000,
 	typing: true,
 	maxQueue: 20,
@@ -69,6 +69,13 @@ function strList(value) {
 	return Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim()).map((v) => v.trim()) : [];
 }
 
+function boolIn(value, fallback) {
+	if (typeof value === "boolean") return value;
+	if (value === "true" || value === 1) return true;
+	if (value === "false" || value === 0) return false;
+	return fallback;
+}
+
 function intIn(value, fallback, min, max) {
 	const n = Number(value);
 	if (!Number.isFinite(n)) return fallback;
@@ -89,21 +96,21 @@ export function readRawConfig(file = configPath()) {
 
 export function normalizeConfig(raw = {}) {
 	const cfg = mergeSection(DEFAULT_CONFIG, raw);
-	cfg.enabled = raw.enabled !== false;
+	cfg.enabled = boolIn(raw.enabled, true);
 	cfg.appId = String(cfg.appId ?? "").trim();
 	cfg.clientSecret = String(cfg.clientSecret ?? "").trim();
-	cfg.sandbox = cfg.sandbox === true;
+	cfg.sandbox = boolIn(raw.sandbox, false);
 	cfg.allowUsers = strList(cfg.allowUsers);
 	cfg.allowGroups = strList(cfg.allowGroups);
-	cfg.allowAll = cfg.allowAll === true;
-	cfg.envelope = cfg.envelope !== false;
+	cfg.allowAll = boolIn(raw.allowAll, false);
+	cfg.envelope = boolIn(raw.envelope, true);
 	cfg.replyPrefix = typeof cfg.replyPrefix === "string" ? cfg.replyPrefix : "";
 	cfg.replyFormat = REPLY_FORMATS.has(cfg.replyFormat) ? cfg.replyFormat : "plain";
 	cfg.maxChunks = intIn(cfg.maxChunks, 4, 1, 5);
 	cfg.replyQuota = intIn(cfg.replyQuota, 5, 1, 5);
 	cfg.chunkChars = intIn(cfg.chunkChars, 4000, 100, 4000);
 	cfg.maxQueue = intIn(cfg.maxQueue, 20, 1, 200);
-	cfg.typing = cfg.typing !== false;
+	cfg.typing = boolIn(raw.typing, true);
 	cfg.emptyReply = typeof cfg.emptyReply === "string" && cfg.emptyReply ? cfg.emptyReply : DEFAULT_CONFIG.emptyReply;
 	cfg.ackAfterMs = intIn(cfg.ackAfterMs, 0, 0, 300000);
 	cfg.dedupeTtlMs = intIn(cfg.dedupeTtlMs, DEFAULT_CONFIG.dedupeTtlMs, 1000, 86400000);
@@ -111,15 +118,17 @@ export function normalizeConfig(raw = {}) {
 	cfg.passiveWindowSec.group = intIn(cfg.passiveWindowSec.group, 300, 10, 3600);
 	cfg.passiveWindowSec.private = intIn(cfg.passiveWindowSec.private, 3600, 10, 86400);
 	cfg.images = mergeSection(DEFAULT_CONFIG.images, cfg.images);
-	cfg.images.enabled = cfg.images.enabled !== false;
+	cfg.images.enabled = boolIn(cfg.images.enabled, true);
 	cfg.images.maxCount = intIn(cfg.images.maxCount, 2, 0, 10);
 	cfg.images.maxBytes = intIn(cfg.images.maxBytes, DEFAULT_CONFIG.images.maxBytes, 1024, 30 * 1024 * 1024);
 	cfg.files = mergeSection(DEFAULT_CONFIG.files, cfg.files);
-	cfg.files.enabled = cfg.files.enabled !== false;
+	cfg.files.enabled = boolIn(cfg.files.enabled, true);
 	cfg.files.maxCount = intIn(cfg.files.maxCount, 3, 0, 3);
 	cfg.files.maxBytes = intIn(cfg.files.maxBytes, DEFAULT_CONFIG.files.maxBytes, 1024, 200 * 1024 * 1024);
-	cfg.files.allowDirs = strList(cfg.files.allowDirs);
-	cfg.lock = cfg.lock !== false;
+	// 字符串误写成单个目录时按一个白名单处理；绝不能让类型错误退化成“不限制”
+	if (typeof cfg.files.allowDirs === "string") cfg.files.allowDirs = [cfg.files.allowDirs];
+	else cfg.files.allowDirs = strList(cfg.files.allowDirs);
+	cfg.lock = boolIn(raw.lock, true);
 	cfg.log = mergeSection(DEFAULT_CONFIG.log, cfg.log);
 	if (!LEVELS.has(cfg.log.level)) cfg.log.level = "info";
 	cfg.log.file = expandHome(cfg.log.file || DEFAULT_CONFIG.log.file);
@@ -162,6 +171,9 @@ export function loadConfig(file = configPath()) {
 	}
 	if (!exists) warnings.push(`配置文件不存在：${file}`);
 	const config = applyEnv(normalizeConfig(raw));
+	if (config.files?.enabled && config.files.allowDirs.length === 0) {
+		warnings.push("files.allowDirs 为空：除内置敏感路径外，任意路径都能被 [[file:...]] 发送；建议限定目录");
+	}
 	const error = exists ? validateConfig(config) : `配置文件不存在：${file}`;
 	return { config, path: file, exists, warnings, error };
 }

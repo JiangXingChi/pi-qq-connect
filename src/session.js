@@ -36,8 +36,21 @@ async function downloadImage(url, maxBytes, headers = {}) {
 		if (!res.ok) return null;
 		const mimeType = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
 		if (!mimeType.startsWith("image/")) return null;
-		const buf = Buffer.from(await res.arrayBuffer());
-		if (buf.length === 0 || buf.length > maxBytes) return null;
+		const declared = Number(res.headers.get("content-length"));
+		if (Number.isFinite(declared) && declared > maxBytes) return null;
+		if (!res.body) return null;
+		const chunks = [];
+		let total = 0;
+		for await (const chunk of res.body) {
+			total += chunk.length;
+			if (total > maxBytes) {
+				await res.body.cancel().catch(() => {});
+				return null;
+			}
+			chunks.push(Buffer.from(chunk));
+		}
+		const buf = Buffer.concat(chunks);
+		if (buf.length === 0) return null;
 		return { type: "image", data: buf.toString("base64"), mimeType };
 	} catch {
 		return null;
@@ -45,7 +58,7 @@ async function downloadImage(url, maxBytes, headers = {}) {
 }
 
 export class QqBridge {
-	constructor({ pi, api, config, log, notify, isOnline, onNewSession }) {
+	constructor({ pi, api, config, log, notify, isOnline, onNewSession, injectTimeoutMs = 5000 }) {
 		this.pi = pi;
 		this.api = api;
 		this.cfg = config;
@@ -58,6 +71,8 @@ export class QqBridge {
 		this.running = false;
 		this.finishing = false;
 		this.pumping = false;
+		this.injecting = false;
+		this.injectTimeoutMs = injectTimeoutMs;
 		this.stopped = false;
 		this.seen = new Map();
 		this.lastByChat = new Map();
@@ -65,6 +80,7 @@ export class QqBridge {
 		this.generation = 0;
 		this.retryTimer = undefined;
 		this.ackTimer = undefined;
+		this.injectTimer = undefined;
 		this.stats = { received: 0, ignored: 0, sent: 0, failed: 0 };
 	}
 
@@ -85,7 +101,7 @@ export class QqBridge {
 		this.queue = [];
 		this.inflight = undefined;
 		this.running = false;
-		this.finishing = false;
+		this.injecting = false;
 	}
 
 	/** 新会话就绪：回执并清空旧状态。 */
@@ -144,6 +160,10 @@ export class QqBridge {
 		if (this.ackTimer) {
 			clearTimeout(this.ackTimer);
 			this.ackTimer = undefined;
+		}
+		if (this.injectTimer) {
+			clearTimeout(this.injectTimer);
+			this.injectTimer = undefined;
 		}
 	}
 
@@ -222,6 +242,12 @@ export class QqBridge {
 		if (prompt && prompt !== inflight.promptText.trim()) {
 			inflight.foreign = true;
 			this.log.warn("本轮是终端里输入的消息，跳过收集");
+			return;
+		}
+		inflight.started = true;
+		if (this.injectTimer) {
+			clearTimeout(this.injectTimer);
+			this.injectTimer = undefined;
 		}
 	}
 
@@ -234,6 +260,10 @@ export class QqBridge {
 
 	onAgentSettled(aborted = false) {
 		this.running = false;
+		if (this.injectTimer) {
+			clearTimeout(this.injectTimer);
+			this.injectTimer = undefined;
+		}
 		const inflight = this.inflight;
 		if (!inflight) {
 			void this.pump();
@@ -272,7 +302,7 @@ export class QqBridge {
 	}
 
 	async pump() {
-		if (this.stopped || this.pumping || this.finishing || this.inflight || this.running || this.queue.length === 0) return;
+		if (this.stopped || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
 		this.pumping = true;
 		try {
 			await this.#pumpOnce();
@@ -281,6 +311,10 @@ export class QqBridge {
 			this.#scheduleRetry();
 		} finally {
 			this.pumping = false;
+			// 取 token / 下载图片期间被换会话或 stop 打断时，队列可能还有消息，补泵一次
+			if (!this.stopped && !this.finishing && !this.injecting && !this.inflight && !this.running && this.queue.length > 0) {
+				void this.pump();
+			}
 		}
 	}
 
@@ -289,7 +323,6 @@ export class QqBridge {
 		const item = this.queue.shift();
 		const prompt = buildPrompt(item, this.cfg);
 
-		const images = [];
 		let token = null;
 		try {
 			token = await this.api.auth?.getToken?.();
@@ -297,11 +330,15 @@ export class QqBridge {
 			token = null;
 		}
 		const mediaHeaders = token ? { Authorization: `QQBot ${token}` } : {};
-		for (const url of prompt.imageUrls) {
-			const image = await downloadImage(url, this.cfg.images.maxBytes, mediaHeaders);
-			if (image) images.push(image);
-			else this.log.warn(`图片下载失败：${url.slice(0, 80)}`);
-		}
+		// 最多 2 张，并发下载；单张内部按 maxBytes 流式截断
+		const downloaded = await Promise.all(
+			prompt.imageUrls.map(async (url) => {
+				const image = await downloadImage(url, this.cfg.images.maxBytes, mediaHeaders);
+				if (!image) this.log.warn(`图片下载失败：${url.slice(0, 80)}`);
+				return image;
+			}),
+		);
+		const images = downloaded.filter(Boolean);
 
 		// 下载期间可能被 stop()、换会话或已经排了新消息
 		if (this.stopped || generation !== this.generation) {
@@ -326,13 +363,15 @@ export class QqBridge {
 			const content = images.length > 0 ? [{ type: "text", text: prompt.text }, ...images] : prompt.text;
 			this.pi.sendUserMessage(content);
 			this.log.info(`已注入 Pi（chat=${maskId(item.chatId)}，图片 ${images.length} 张）`);
+			// Pi 的 sendUserMessage 是 fire-and-forget，异步失败不会抛回来；靠看门狗兜底
+			this.#armInjectWatchdog(inflight);
 			this.#armAck(inflight);
 			this.#startTyping(inflight);
 		} catch (err) {
 			// 可能刚好在流式输出中：放回队首，等 agent_settled 或定时器再试
 			this.inflight = undefined;
 			this.queue.unshift(item);
-			this.running = true;
+			this.injecting = true;
 			this.log.warn(`注入失败，等空闲后重试：${err?.message ?? err}`);
 			this.#scheduleRetry();
 		}
@@ -342,10 +381,32 @@ export class QqBridge {
 		if (this.retryTimer || this.stopped) return;
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = undefined;
-			this.running = false;
+			this.injecting = false;
 			void this.pump();
 		}, 2000);
 		this.retryTimer.unref?.();
+	}
+
+	/** 注入后等 before_agent_start；超时说明 Pi 静默拒绝了这条消息，重排一次。 */
+	#armInjectWatchdog(inflight) {
+		if (!this.injectTimeoutMs || this.injectTimeoutMs <= 0) return;
+		if (this.injectTimer) clearTimeout(this.injectTimer);
+		this.injectTimer = setTimeout(() => {
+			this.injectTimer = undefined;
+			if (this.inflight !== inflight || inflight.started || this.stopped) return;
+			this.log.warn(`注入后 ${this.injectTimeoutMs}ms 没有开始执行，判定注入失败`);
+			this.#clearAckTimer();
+			this.#stopTyping(inflight);
+			this.inflight = undefined;
+			if (!inflight.item.injectRetried) {
+				inflight.item.injectRetried = true;
+				this.queue.unshift(inflight.item);
+			} else {
+				this.notify("QQ 消息注入 Pi 失败（模型没有开始执行），请重发", "warning");
+			}
+			void this.pump();
+		}, this.injectTimeoutMs);
+		this.injectTimer.unref?.();
 	}
 
 	#armAck(inflight) {
@@ -419,25 +480,32 @@ export class QqBridge {
 	#isPermanentSendError(err) {
 		const status = Number(err?.status ?? 0);
 		if (status === 429) return false; // 限流可重试
+		const code = Number(err?.code);
+		// 业务错误常以 HTTP 200 + err_code 返回，不能靠 status 判断
+		if ([40034005, 40034024, 40034006, 40034128, 40054013].includes(code)) return true;
 		if ([400, 403, 404].includes(status)) return true;
 		const message = String(err?.message ?? err).toLowerCase();
 		return /invalid|forbidden|not found|bad request|limit exceed|超频|频率/.test(message);
 	}
 
-	/** 发送失败重试 2 次（1s/2s），每次换新 msg_seq；永久错误直接放弃。 */
+	/** 发送失败重试 2 次（1s/2s）；同一条内容复用同一个 msg_seq，重复即视为已送达。 */
 	async #sendWithRetry(inflight, send, { attempts = 3 } = {}) {
+		if (inflight.attemptsLeft <= 0) {
+			throw new Error(`被动回复额度已用完（每条消息最多 ${inflight.quotaMax} 次）`);
+		}
+		// 一条逻辑消息只扣一次额度；重试不额外占用户可见的回复次数
+		inflight.attemptsLeft--;
+		const seq = this.#nextSeq(inflight);
 		let lastError;
 		for (let attempt = 0; attempt < attempts; attempt++) {
-			if (inflight.attemptsLeft <= 0) {
-				throw new Error(`被动回复额度已用完（每条消息最多 ${inflight.quotaMax} 次）`);
-			}
-			inflight.attemptsLeft--;
 			try {
-				return await send(this.#nextSeq(inflight));
+				return await send(seq);
 			} catch (err) {
 				lastError = err;
+				// 40054005：同一 msg_id+msg_seq 已发过，说明上一次其实成功
+				if (Number(err?.code) === 40054005) return undefined;
 				if (this.#isPermanentSendError(err)) break;
-				if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+				if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
 			}
 		}
 		throw lastError;
@@ -493,7 +561,8 @@ export class QqBridge {
 		const body = markdown ? parsed.text.trim() : stripMarkdown(parsed.text);
 
 		// 额度要给文件留位置：单聊总共 4 次，1 段文字 + 3 个文件正好用完。
-		const reserveAck = this.cfg.ackAfterMs > 0 && !inflight.ackSent && inflight.attemptsLeft > 1 ? 1 : 0;
+		// #finish 在进 #deliver 前已经清掉回执定时器，这里不可能再发回执，别再预留额度
+		const reserveAck = 0;
 		const available = Math.max(0, inflight.attemptsLeft - reserveAck);
 		const wantText = body.length > 0 || parsed.files.length === 0;
 		const filesToSend = parsed.files.slice(0, Math.max(0, Math.min(parsed.files.length, available - (wantText ? 1 : 0))));
@@ -565,8 +634,9 @@ export class QqBridge {
 						maxBytes: this.cfg.files.maxBytes,
 						allowDirs: this.cfg.files.allowDirs,
 					});
+					const fileMsgId = this.#resolveMsgId(item);
 					await this.#sendWithRetry(inflight, (seq) =>
-						this.api.sendMedia(target, uploaded.fileInfo, { msgId, msgSeq: seq }),
+						this.api.sendMedia(target, uploaded.fileInfo, { msgId: fileMsgId, msgSeq: seq }),
 					);
 					sentFiles++;
 					this.stats.sent++;

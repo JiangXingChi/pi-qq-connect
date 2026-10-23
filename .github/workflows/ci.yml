@@ -15,5 +15,9 @@ jobs:
       - run: npm test
       - name: Check npm tarball contents
         run: |
+          set -o pipefail
           npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          for f in index.js src/index.js bin/pi-qqbot.mjs README.md; do
+            grep -q "$f" /tmp/pack.txt
+          done
           ! grep -Eq 'pi-qqbot\.json|\.log|/test/|\.git' /tmp/pack.txt

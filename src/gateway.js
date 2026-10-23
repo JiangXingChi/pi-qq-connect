@@ -63,6 +63,9 @@ export class QqGateway {
 		this.openedAt = 0;
 		this.quickDisconnects = 0;
 		this.openGeneration = 0;
+		this.handshakeTimer = undefined;
+		this.heartbeatIntervalMs = 30_000;
+		this.awaitingAckSince = 0;
 	}
 
 	get status() {
@@ -87,6 +90,7 @@ export class QqGateway {
 		this.started = false;
 		this.openGeneration++;
 		this.#clearTimers();
+		this.#clearHandshake();
 		this.#closeSocket();
 		this.#setState("stopped");
 	}
@@ -114,6 +118,24 @@ export class QqGateway {
 		}
 	}
 
+	#clearHandshake() {
+		if (this.handshakeTimer) {
+			clearTimeout(this.handshakeTimer);
+			this.handshakeTimer = undefined;
+		}
+	}
+
+	#armHandshake(ws) {
+		this.#clearHandshake();
+		this.handshakeTimer = setTimeout(() => {
+			this.handshakeTimer = undefined;
+			if (this.ws !== ws || this.state === "connected" || this.closing) return;
+			this.log?.warn("网关握手超时（没有 Hello/READY），重连");
+			this.#softReconnect();
+		}, 15_000);
+		this.handshakeTimer.unref?.();
+	}
+
 	#clearTimers() {
 		if (this.heartbeatTimer) {
 			clearInterval(this.heartbeatTimer);
@@ -134,6 +156,7 @@ export class QqGateway {
 		} catch {
 			// ignore
 		}
+		this.awaitingAckSince = 0;
 	}
 
 	async #open() {
@@ -166,6 +189,7 @@ export class QqGateway {
 
 		ws.addEventListener("open", () => {
 			this.openedAt = Date.now();
+			this.#armHandshake(ws);
 			this.log?.info("网关连接已建立，等待 Hello");
 		});
 		ws.addEventListener("message", (event) => {
@@ -181,6 +205,7 @@ export class QqGateway {
 
 	#handleClose(code, reason) {
 		this.ws = undefined;
+		this.#clearHandshake();
 		this.#clearTimers();
 		this.lastCloseCode = code;
 		this.log?.warn(`网关断开（code=${code}${reason ? `, reason=${reason}` : ""}）`);
@@ -249,6 +274,7 @@ export class QqGateway {
 				this.#onHello(payload.d ?? {});
 				break;
 			case OP_HEARTBEAT_ACK:
+				this.awaitingAckSince = 0;
 				break;
 			case OP_DISPATCH:
 				this.#onDispatch(payload);
@@ -276,6 +302,7 @@ export class QqGateway {
 	#softReconnect() {
 		this.openGeneration++; // 使正在 await 的旧 #open 失效
 		this.#clearTimers();
+		this.#clearHandshake();
 		this.#closeSocket();
 		this.#setState("disconnected");
 		this.#scheduleReconnect();
@@ -284,8 +311,21 @@ export class QqGateway {
 	#onHello(d) {
 		const interval = Number(d.heartbeat_interval) > 0 ? Number(d.heartbeat_interval) : this.heartbeatTimeoutMs ?? 30_000;
 		this.#clearHeartbeat();
+		this.heartbeatIntervalMs = interval;
+		this.awaitingAckSince = 0;
 		// 用 80% 的间隔发心跳，避免刚好卡在服务端超时线上（Hermes 同样取 0.8）
-		this.heartbeatTimer = setInterval(() => this.#send({ op: OP_HEARTBEAT, d: this.lastSeq }), Math.max(5_000, interval * 0.8));
+		this.heartbeatTimer = setInterval(() => {
+			const now = Date.now();
+			// 服务端连续 3 个周期没 ACK，说明连接已黑洞，主动重连而不是等平台 30 分钟后踢
+			if (this.awaitingAckSince && now - this.awaitingAckSince > this.heartbeatIntervalMs * 3) {
+				this.log?.warn("心跳连续未 ACK，判定连接已失效，重连");
+				this.awaitingAckSince = 0;
+				this.#softReconnect();
+				return;
+			}
+			if (!this.awaitingAckSince) this.awaitingAckSince = now;
+			this.#send({ op: OP_HEARTBEAT, d: this.lastSeq });
+		}, Math.max(5_000, interval * 0.8));
 		this.heartbeatTimer.unref?.();
 		if (this.sessionId && this.lastSeq !== null) void this.#sendResume();
 		else void this.#sendIdentify();
@@ -336,6 +376,8 @@ export class QqGateway {
 	#onDispatch(payload) {
 		const type = payload.t;
 		if (type === "READY") {
+			this.#clearHandshake();
+			this.awaitingAckSince = 0;
 			this.sessionId = payload.d?.session_id;
 			this.backoffMs = 1000;
 			this.#setState("connected");
@@ -344,6 +386,8 @@ export class QqGateway {
 			return;
 		}
 		if (type === "RESUMED") {
+			this.#clearHandshake();
+			this.awaitingAckSince = 0;
 			this.backoffMs = 1000;
 			this.#setState("connected");
 			this.log?.info("网关 RESUMED");

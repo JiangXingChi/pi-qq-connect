@@ -80,8 +80,7 @@ export class QqApi {
 			msg_id: msgId,
 			msg_seq: msgSeq,
 		};
-		// 官方文档：群聊即使发 Markdown 也要带 content
-		if (target.type === "group") body.content = " ";
+		// 官方群消息文档：传了 markdown 后 content 必须为空（不要带占位空格）
 		return this.request("POST", this.#messagesPath(target), body);
 	}
 
@@ -163,14 +162,15 @@ export class QqApi {
 			let json;
 			try {
 				json = text ? JSON.parse(text) : {};
-			} catch {
-				json = { raw: text };
-			}
+				} catch {
+				// 非 JSON（代理错误页等）只留摘录，避免撑爆日志/带入换行
+				json = { raw: String(text ?? "").replace(/\s+/g, " ").slice(0, 200) };
+				}
 			return { res, json };
 		};
 
 		let { res, json } = await doFetch(token);
-		if (res.status === 401 || res.status === 403) {
+		if (res.status === 401) {
 			this.auth.invalidate();
 			({ res, json } = await doFetch(await this.auth.getToken()));
 		}

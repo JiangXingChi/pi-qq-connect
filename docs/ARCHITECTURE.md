@@ -33,7 +33,7 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
 | `src/service.js` | 后台常驻服务状态文件、心跳、起停、stale pid 处理 |
 | `src/lock.js` | 单实例锁 + 看门狗 |
 | `src/log.js` | 文件日志、级别过滤、2 MiB 轮转 |
-| `bin/pi-qqbot.mjs` | detached 启动 `pi --mode rpc --no-session --extension <dir>` |
+| `bin/pi-qqbot.mjs` | detached 启动 `pi --mode rpc --session-id pi-qqbot-service --extension <dir>` |
 
 ## 一次消息的生命周期
 
@@ -68,7 +68,7 @@ QQ 里发 `/qq new`：桥拦截，不注入模型，改用
 ## 后台服务
 
 `/qq start` 让当前进程先让出网关和锁，再 detached 拉起 `bin/pi-qqbot.mjs`，它执行
-`pi --mode rpc --no-session --extension <dir>` 并保持 stdin 打开。服务每 15 秒写心跳到
+`pi --mode rpc --session-id pi-qqbot-service --extension <dir>` 并保持 stdin 打开。服务每 15 秒写心跳到
 `~/.pi/agent/pi-qqbot.service.json`；超过 45 秒未更新视为掉线。TUI 里的扩展检测到服务在线时
 只做控制面，不连网关、不抢锁。
 
@@ -86,11 +86,11 @@ QQ 里发 `/qq new`：桥拦截，不注入模型，改用
 
 - 凭据只在配置文件，不写日志、不进仓库；日志对 openid/msg_id 做掩码。
 - 出站文件必须由模型在回复里显式标记；插件再校验普通文件、≤200MB、非敏感路径。
-- 被动回复额度：单聊 4 次、群聊 5 次（含回执和重试）；超时回退到同会话最新 `msg_id`。
+- 被动回复额度：单聊 4 次、群聊 5 次（含回执；重试复用 `msg_seq`，不额外占额度）；超时回退到同会话最新 `msg_id`。
 - 单实例锁避免两个 Pi 进程各收一半 QQ 消息；`/qq take` 只用于锁冲突。
 
 ## 测试
 
-- `npm test`：39 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传。
+- `npm test`：42 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传。
 - `npm run e2e`：真 `pi --mode rpc` + mock QQ，调一次模型。
 - `npm run e2e:service` / `e2e:service-cmd`：后台服务生命周期与 `/qq start|stop`。

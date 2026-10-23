@@ -65,31 +65,48 @@ function beat() {
 	}
 }
 
+function scheduleRestart() {
+	restartDelay = Date.now() - startedAt > 60_000 ? 3000 : Math.min(restartDelay * 2, 60_000);
+	if (restart) {
+		setTimeout(launch, restartDelay);
+	} else {
+		console.error("[pi-qqbot] --no-restart：服务结束");
+		removeServiceState(stateFile);
+		process.exit(0);
+	}
+}
+
 function launch() {
 	// --no-extensions：只加载本插件，避免机器上另一份 pi-qqbot 被自动发现、两个网关互相抢锁
 	const args = ["--mode", "rpc", "--no-extensions", "--session-id", String(sessionId), "--extension", root, ...extra];
 	console.error(`[pi-qqbot] 启动：pi ${args.join(" ")}（cwd=${cwd}）`);
 	startedAt = Date.now();
-	child = spawn("pi", args, {
-		cwd: String(cwd),
-		stdio: ["pipe", "inherit", "inherit"],
-		env: { ...process.env, QQBOT_SERVICE_PID: String(process.pid) },
-	});
-	child.on("exit", (code, signal) => {
+	let launched;
+	try {
+		launched = spawn("pi", args, {
+			cwd: String(cwd),
+			stdio: ["pipe", "inherit", "inherit"],
+			env: { ...process.env, QQBOT_SERVICE_PID: String(process.pid) },
+		});
+	} catch (err) {
+		console.error(`[pi-qqbot] 无法启动 pi：${err.message}`);
+		scheduleRestart();
+		return;
+	}
+	child = launched;
+	let ended = false;
+	const onEnd = (why) => {
+		if (ended) return;
+		ended = true;
 		child = undefined;
 		if (stopping) return;
-		console.error(`[pi-qqbot] pi 退出（code=${code} signal=${signal}）`);
-		// 稳定运行超过 1 分钟才重置退避，避免崩溃循环刷屏
-		restartDelay = Date.now() - startedAt > 60_000 ? 3000 : Math.min(restartDelay * 2, 60_000);
-		if (restart) {
-			setTimeout(launch, restartDelay);
-		} else {
-			console.error("[pi-qqbot] --no-restart：服务结束");
-			removeServiceState(stateFile);
-			process.exit(0);
-		}
-	});
-	child.on("error", (err) => console.error(`[pi-qqbot] 无法启动 pi：${err.message}`));
+		console.error(`[pi-qqbot] pi ${why}`);
+		scheduleRestart();
+	};
+	launched.once("exit", (code, signal) => onEnd(`退出（code=${code} signal=${signal}）`));
+	// spawn 失败只发 error/close，不会发 exit；必须走同一套重启逻辑
+	launched.once("error", (err) => onEnd(`无法启动：${err.message}`));
+	launched.once("close", (code) => onEnd(`关闭（code=${code}）`));
 }
 
 function shutdown(signal) {
@@ -110,7 +127,14 @@ function shutdown(signal) {
 	}, 100);
 	waiter.unref?.();
 	setTimeout(() => {
-		if (child) console.error("[pi-qqbot] 子进程 8 秒内未退出，先结束服务进程");
+		if (child) {
+			console.error("[pi-qqbot] 子进程 8 秒内未退出，强制结束，避免留下占网关的孤儿");
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				// ignore
+			}
+		}
 		process.exit(0);
 	}, 8000);
 }
@@ -123,7 +147,8 @@ process.on("exit", () => removeServiceState(stateFile));
 const existing = readServiceState(stateFile);
 if (existing && existing.pid !== process.pid && isServiceAlive(existing)) {
 	console.error(`[pi-qqbot] 已有后台服务在运行（pid ${existing.pid}），本进程退出`);
-	process.exit(1);
+	// 干净退出：systemd Restart=on-failure 不会每 5 秒反复拉起这个注定失败的实例
+	process.exit(0);
 }
 
 beat();

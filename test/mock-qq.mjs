@@ -19,6 +19,8 @@ export async function startMockQq({ port = 0, heartbeatMs = 30_000, path = "/ws"
 		messageRequests: [],
 		uploadPrepares: [],
 		uploadParts: [],
+		replySeqs: new Set(),
+		replyCounts: new Map(),
 		partFinishes: [],
 		fileMerges: [],
 		failNextSend: null,
@@ -118,6 +120,18 @@ export async function startMockQq({ port = 0, heartbeatMs = 30_000, path = "/ws"
 					const failure = state.failNextSend;
 					state.failNextSend = null;
 					return json(failure.status ?? 400, failure.body ?? { code: 40054, message: "mock failure" });
+				}
+				// 真实平台：同一 (msg_id, msg_seq) 重复会失败；每条入站消息回复次数有上限
+				const replyKey = `${record.body?.msg_id}:${record.body?.msg_seq}`;
+				if (record.body?.msg_id && state.replySeqs.has(replyKey)) {
+					return json(400, { code: 40054005, message: "消息被去重" });
+				}
+				if (record.body?.msg_id) {
+					const used = (state.replyCounts.get(record.body.msg_id) ?? 0) + 1;
+					const limit = record.type === "group" ? 5 : 4;
+					if (used > limit) return json(400, { code: 22009, message: "msg limit exceed" });
+					state.replySeqs.add(replyKey);
+					state.replyCounts.set(record.body.msg_id, used);
 				}
 				state.sends.push(record);
 				return json(200, { id: `sent-${state.sends.length}`, timestamp: String(Date.now()) });

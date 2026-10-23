@@ -13,7 +13,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const MARKER = /\[\[file:\s*([^\]\n]+?)\s*\]\]/gi;
 const HARD_LIMIT = 200 * 1024 * 1024;
 const IMAGE_LIMIT = 20 * 1024 * 1024;
 const VIDEO_LIMIT = 30 * 1024 * 1024;
@@ -28,8 +27,15 @@ const DENY = [
 	/\/\.pi\/agent\//,
 	/\/\.local\/share\/keyrings\//,
 	/(^|\/)\.env(\.|$)/i,
+	/(^|\/)\.netrc$/i,
+	/(^|\/)\.npmrc$/i,
+	/(^|\/)\.git-credentials$/i,
+	/(^|\/)\.docker\/config\.json$/i,
+	/(^|\/)\.kube\/config$/i,
 	/(^|\/)pi-qqbot\.json$/,
 	/(^|\/)id_(rsa|ed25519|ecdsa)$/,
+	/\.pem$/i,
+	/\.key$/i,
 ];
 
 function expandHome(p) {
@@ -46,9 +52,24 @@ export function parseFileMarkers(text, { maxCount = 3 } = {}) {
 	const source = String(text ?? "");
 	const files = [];
 	const skipped = [];
-	let match;
-	MARKER.lastIndex = 0;
-	while ((match = MARKER.exec(source))) {
+	const kept = [];
+	let inFence = false;
+	// 只认围栏外、独占一行的标记：避免把示例/代码块里的 [[file:...]] 真的发出去
+	for (const line of source.split("\n")) {
+		if (/^\s*```/.test(line)) {
+			inFence = !inFence;
+			kept.push(line);
+			continue;
+		}
+		if (inFence) {
+			kept.push(line);
+			continue;
+		}
+		const match = /^\s*\[\[file:\s*([^\]\n]+?)\s*\]\]\s*$/i.exec(line);
+		if (!match) {
+			kept.push(line);
+			continue;
+		}
 		const raw = expandHome(match[1].trim().replace(/^["'`]|["'`]$/g, ""));
 		if (!raw) continue;
 		if (!path.isAbsolute(raw)) {
@@ -63,10 +84,7 @@ export function parseFileMarkers(text, { maxCount = 3 } = {}) {
 		}
 		files.push(resolved);
 	}
-	const cleaned = source
-		.replace(MARKER, "")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
+	const cleaned = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 	return { text: cleaned, files, skipped };
 }
 
@@ -81,10 +99,19 @@ export async function inspectFile(filePath, { maxBytes = HARD_LIMIT, allowDirs =
 	const normalized = real.split(path.sep).join("/");
 	if (DENY.some((re) => re.test(normalized))) return { ok: false, reason: "敏感路径，拒绝发送" };
 	if (allowDirs.length > 0) {
-		const allowed = allowDirs.map((dir) => path.resolve(expandHome(String(dir))));
-		if (!allowed.some((dir) => real === dir || real.startsWith(dir + path.sep))) {
-			return { ok: false, reason: "不在允许的目录里" };
-		}
+		const allowed = allowDirs.map((dir) => {
+			const resolved = path.resolve(expandHome(String(dir)));
+			try {
+				return fs.realpathSync(resolved);
+			} catch {
+				return resolved;
+			}
+		});
+		const inside = allowed.some((dir) => {
+			const rel = path.relative(dir, real);
+			return rel === "" || (!rel.startsWith(".." + path.sep) && rel !== ".." && !path.isAbsolute(rel));
+		});
+		if (!inside) return { ok: false, reason: "不在允许的目录里" };
 	}
 	const stat = await fs.promises.stat(real);
 	if (!stat.isFile()) return { ok: false, reason: "不是普通文件" };
@@ -137,7 +164,9 @@ async function withRetry(fn, label, log) {
 		} catch (err) {
 			lastError = err;
 			const status = Number(err?.status ?? 0);
-			const transient = status === 0 || status === 429 || status >= 500;
+			// 40093001（分片瞬时失败）、850027（发送超时）也是 HTTP 200 + err_code
+			const transient =
+				status === 0 || status === 429 || status >= 500 || [40093001, 850027].includes(Number(err?.code));
 			if (!transient) throw err;
 			if (attempt < 2) {
 				log?.warn(`${label} 失败，第 ${attempt + 1} 次重试：${err?.message ?? err}`);
@@ -169,12 +198,12 @@ export async function uploadFile(api, target, filePath, { log, maxBytes, allowDi
 	if (!info.ok) throw new Error(`${path.basename(filePath)}：${info.reason}`);
 	const fileType = fileTypeFor(info.path, info.size);
 	const hashes = await hashFile(info.path, info.size);
-	const prep = await api.uploadPrepare(target, {
+	const prep = await withRetry(() => api.uploadPrepare(target, {
 		fileType,
 		fileSize: info.size,
 		fileName: info.name,
 		...hashes,
-	});
+	}), "预上传", log);
 	if (!prep?.upload_id || !Array.isArray(prep.parts) || prep.parts.length === 0) {
 		throw new Error("预上传没有返回 upload_id 或分片");
 	}
@@ -185,9 +214,11 @@ export async function uploadFile(api, target, filePath, { log, maxBytes, allowDi
 		let offset = 0;
 		for (const part of parts) {
 			const block = Number(part.block_size) || Number(prep.block_size);
-			const length = Math.min(block, info.size - offset);
+			if (!Number.isFinite(block) || block <= 0) throw new Error("分片大小无效");
+			const length = Math.min(Math.min(block, 16 * 1024 * 1024), info.size - offset);
 			if (length <= 0) break;
 			const buf = await readSlice(handle, offset, length);
+			if (buf.length !== length) throw new Error(`分片 ${part.index} 读取不完整（${buf.length}/${length} 字节）`);
 			await withRetry(() => api.putPresigned(part.presigned_url, buf), `PUT 分片 ${part.index}`, log);
 			await withRetry(() => api.uploadPartFinish(target, {
 				uploadId: prep.upload_id,

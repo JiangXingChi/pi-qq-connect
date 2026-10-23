@@ -84,6 +84,9 @@ export function startService({ binPath, baseDir, cwd, sessionId = "pi-qqbot-serv
 	if (!fs.existsSync(binPath)) {
 		return { pid: null, logFile, error: `找不到启动脚本：${binPath}` };
 	}
+	if (!fs.existsSync(cwd)) {
+		return { pid: null, logFile, error: `工作目录不存在：${cwd}` };
+	}
 	fs.mkdirSync(path.dirname(logFile), { recursive: true });
 	try {
 		if (fs.statSync(logFile).size > 5 * 1024 * 1024) fs.renameSync(logFile, `${logFile}.1`);
@@ -99,6 +102,8 @@ export function startService({ binPath, baseDir, cwd, sessionId = "pi-qqbot-serv
 			stdio: ["ignore", out, out],
 			env: { ...process.env },
 		});
+		// spawn 的失败是异步 error 事件；没有监听器会直接打崩调用方（TUI）
+		child.on("error", () => {});
 		child.unref();
 		return { pid: child.pid ?? null, logFile };
 	} catch (err) {
@@ -118,7 +123,7 @@ export function startService({ binPath, baseDir, cwd, sessionId = "pi-qqbot-serv
  * SIGTERM 并等它退出；不自动 SIGKILL。
  * 心跳已停但 pid 还活着时（可能是残留 pid 被复用），默认拒绝，需 force。
  */
-export async function stopService(state, { timeoutMs = 5000, intervalMs = 200, force = false } = {}) {
+export async function stopService(state, { timeoutMs = 10_000, intervalMs = 200, force = false } = {}) {
 	if (!state || !isProcessAlive(state.pid)) return { stopped: true, reason: "already-exited" };
 	if (!force && !isServiceAlive(state)) {
 		return {

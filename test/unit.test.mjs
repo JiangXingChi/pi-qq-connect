@@ -83,6 +83,16 @@ test("配置：默认值与被夹取的范围", () => {
 	assert.deepEqual(weird.allowUsers, ["a"]);
 });
 
+test("配置：字符串布尔值不再静默反转", () => {
+	const cfg = normalizeConfig({ sandbox: "true", allowAll: "false", files: { enabled: "false" }, typing: "false" });
+	assert.equal(cfg.sandbox, true);
+	assert.equal(cfg.allowAll, false);
+	assert.equal(cfg.files.enabled, false);
+	assert.equal(cfg.typing, false);
+	const dirs = normalizeConfig({ files: { allowDirs: "/tmp/out" } });
+	assert.deepEqual(dirs.files.allowDirs, ["/tmp/out"]);
+});
+
 test("配置：校验缺凭据与空权限", () => {
 	assert.match(validateConfig(normalizeConfig({})), /appId/);
 	const noSecret = normalizeConfig({ appId: "1234567890" });
@@ -216,7 +226,7 @@ test("桥：发送失败会换新 seq 重试，永久错误不重试", async () 
 	bridge.onAgentSettled(false);
 	await waitFor(() => api.sends.length === 1, { label: "重试成功", timeoutMs: 8000 });
 	assert.equal(api.attempts.length, 2);
-	assert.notEqual(api.attempts[0].msgSeq, api.attempts[1].msgSeq);
+	assert.equal(api.attempts[0].msgSeq, api.attempts[1].msgSeq, "重试必须复用 msg_seq");
 
 	const fake2 = createFakePi();
 	const api2 = stubApi({ failFirst: 1, failStatus: 400 });
@@ -470,10 +480,29 @@ test("桥：流式期间注入失败会重排队", async () => {
 	fake.pi.streaming = true;
 	const bridge = new QqBridge({ pi: fake.pi, api: stubApi(), config: normalizeConfig({ allowAll: true }), log: silentLog });
 	bridge.enqueue(privateItem());
-	await waitFor(() => bridge.queue.length === 1 && bridge.running === true, { label: "重排队" });
+	await waitFor(() => bridge.queue.length === 1 && bridge.injecting === true, { label: "重排队" });
 	fake.pi.streaming = false;
 	bridge.onAgentSettled(false);
 	await waitFor(() => fake.sent.length === 1, { label: "重试注入" });
+});
+
+test("桥：注入被 Pi 静默吞掉时看门狗重排一次并提示", async () => {
+	const fake = createFakePi();
+	fake.pi.sendUserMessage = (content) => fake.sent.push({ content, at: Date.now() });
+	const notifications = [];
+	const bridge = new QqBridge({
+		pi: fake.pi,
+		api: stubApi(),
+		config: normalizeConfig({ allowAll: true }),
+		log: silentLog,
+		notify: (message) => notifications.push(message),
+		injectTimeoutMs: 80,
+	});
+	bridge.enqueue(privateItem());
+	await waitFor(() => fake.sent.length === 1, { label: "第一次注入" });
+	await waitFor(() => fake.sent.length === 2, { label: "重排后第二次注入", timeoutMs: 2000 });
+	await waitFor(() => notifications.some((m) => /注入 Pi 失败/.test(m)), { label: "失败提示", timeoutMs: 2000 });
+	bridge.stop();
 });
 
 // ---------------------------------------------------------------- 后台服务

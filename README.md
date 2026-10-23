@@ -88,7 +88,7 @@ pi install .
 也只切本地 TUI；QQ 会话由服务进程管理。
 
 QQ 侧只认一个命令：`/qq new`（可选带名字）。其余内容都当普通任务交给 Pi。
-`/qq new` 会中止当前正在跑的那一轮并清空待处理队列，因为新会话不会再接收旧会话的输出。
+`/qq new` 会清空待处理队列和旧输出；正在跑的那一轮不会被中断——流式期间发 `/qq new` 可能失败，等这轮结束再发。
 
 ### 发文件
 
@@ -128,7 +128,7 @@ QQ 侧只认一个命令：`/qq new`（可选带名字）。其余内容都当�
 ./bin/pi-qqbot.mjs --cwd ~            # 前台跑
 ```
 
-它拉起 `pi --mode rpc --no-session --extension 本项目`，只要 stdin 不关 pi 就不退出。
+它拉起 `pi --mode rpc --session-id pi-qqbot-service --extension 本项目`，只要 stdin 不关 pi 就不退出。
 需要开机自启（用户级服务 + linger，不用 sudo 装系统服务）：
 
 ```bash
@@ -139,6 +139,8 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 ```
 
 - 单元里已把 `~/.local/bin` 和 `/usr/sbin` 加进 PATH，并固定 `--session-id pi-qqbot-service`。
+- 单元默认指向本机源码路径；npm 全局安装的用户把 `ExecStart` 改成
+  `%h/.npm-global/bin/pi-qqbot --cwd %h --session-id pi-qqbot-service`（路径以 `npm bin -g` 为准）。
 - 网络没就绪也无需处理：网关会按 1s→60s 退避重连，联网后自动上线。
 - 启用 systemd 后日常用 `systemctl --user start|stop|restart pi-qqbot`；
   `/qq stop` 也会停掉它（干净退出，`Restart=on-failure` 不会自动拉回），下次开机再启动。
@@ -156,7 +158,7 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 | `envelope` | true | 给消息加 `[QQ群聊 · 群 xxx · 成员 xxx]` 头 |
 | `replyFormat` | plain | `plain` 清掉 Markdown；`markdown` 走 msg_type=2，被拒自动退回纯文本 |
 | `maxChunks` | 4 | 一条回复最多分几段（平台上限 5，留 1 条余量） |
-| `replyQuota` | 5 | 发送总次数上限（含回执和重试）；实际按场景取小：单聊 4、群 5 |
+| `replyQuota` | 5 | 发送总次数上限（含回执；重试复用 seq）；实际按场景取小：单聊 4、群 5 |
 | `files` | 开启 | `enabled` / `maxCount`（最多 3）/ `maxBytes`（200MB）/ `allowDirs` |
 | `chunkChars` | 4000 | 每段字数 |
 | `typing` | true | 单聊发「正在输入」（群聊 QQ 不支持） |
@@ -193,7 +195,7 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 ## 开发
 
 ```bash
-npm test                  # 39 项单测 + mock QQ
+npm test                  # 42 项单测 + mock QQ
 npm run e2e               # 真 pi --mode rpc + mock QQ（会调一次模型）
 npm run e2e:service       # 后台服务进程生命周期
 npm run e2e:service-cmd   # 真 pi 里 /qq start|stop

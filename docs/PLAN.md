@@ -5,10 +5,10 @@
 自用 Pi 插件：QQ 官方机器人收到的消息进入**当前 Pi 会话**，Pi 的最终回答回到 QQ。
 QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录、一条命令装。
 
-## 当前状态（开发副本，2026-10-22）
+## 当前状态（2026-10-23）
 
-- 版本 `0.2.4`，Node ≥ 22.19，零运行时依赖。
-- 验证：`npm test` 39 项全过；`npm run e2e` / `e2e:service` / `e2e:service-cmd` 三组真 pi 端到端全过。
+- 版本 `0.2.5`，Node ≥ 22.19，零运行时依赖。
+- 验证：`npm test` 42 项全过；`npm run e2e` / `e2e:service` / `e2e:service-cmd` 三组真 pi 端到端全过。
 - 已实现：
   - QQ 私聊 + 群 @ 消息接入当前 Pi 会话，回答按被动回复发回
   - 串行队列、msg_id 去重、被动窗口兜底、回复额度（`replyQuota`）
@@ -20,7 +20,7 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 - 未做 / 候选（按优先级）：
   1. 服务崩溃自愈：目前靠 `/qq start` 或 systemd，插件不自动重拉
   2. 多会话隔离：所有 QQ 对话共用一条 Pi 上下文（可用 `/qq new` 手动切）
-  3. 出站富媒体：不能把本地图片/文件作为 QQ 富媒体发出
+  3. 出站富媒体已做：`[[file:...]]` 标记 + 分片上传
   4. Markdown 默认仍是 `plain`，需要用户在配置里显式开
   5. 频道（guild）与频道私信未接入，只做了 C2C + 群
   6. 没有发布到 npm / pi.dev，仅本地软链安装
@@ -81,7 +81,7 @@ test/{ws-server,mock-qq,harness,unit.test,e2e}.mjs
 | 计划项 | 结果 |
 |---|---|
 | 串行队列 + agent_start/settled 跟踪 | ✅ 单测「流式期间注入失败会重排队」 |
-| 回复预算 4 条、msg_seq 递增 | ✅ 单测「回复预算截断」 |
+| 被动回复按场景 4/5 条、重试复用 msg_seq | ✅ 单测「回复预算截断」「重试复用 seq」 |
 | 群 5 分钟 / 单聊 60 分钟窗口兜底 | ✅ 单测「被动窗口过期后改用同会话最新 msg_id」 |
 | msg_id 去重 | ✅ 单测「msg_id 去重」 |
 | 入站图片转 Pi image content | ✅ 代码实现（https + 大小/数量上限，失败降级文字） |
@@ -91,7 +91,7 @@ test/{ws-server,mock-qq,harness,unit.test,e2e}.mjs
 | 端到端 | ✅ 真 pi 回复 `pong`，mock 收到 `{content:"pong",msg_type:0,msg_id:"e2e-msg-1",msg_seq:1}` |
 
 计划外补充：`before_agent_start` 判定「这轮是不是 QQ 发起的」（终端里输入的消息不会被误回给 QQ）、
-Markdown 被拒自动降级纯文本、`ackAfterMs` 慢任务回执、`/qq fresh`、配置热读。
+Markdown 被拒自动降级纯文本、`ackAfterMs` 慢任务回执。
 
 计划删减：webhook 模式（v2 计划已去掉，官方正向 WS 不需要公网回调）、
 QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事件回调里不能安全调用）。
