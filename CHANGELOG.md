@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.6 — 2026-10-23
+
+- `/qq start` 拉起的服务在锁被旧进程短暂占着时会等最多 4 秒重试，避免“心跳在线但网关没连上”。
+- `/qq stop --force` 在 Linux 上校验 `/proc/<pid>/cmdline` 含 `pi-qqbot`，pid 被无关进程复用时拒绝结束。
+- `before_agent_start` 没有 prompt 时不误判为 QQ 轮次开始。
+- 文档修正：`--session-id`（不是 `--no-session`）、`/qq new` 不会中断正在跑的轮次、npm tarball 包含 PLAN、systemd 单元路径说明。
+
 ## 0.2.5 — 2026-10-23
 
 审改修复（不新增功能）：

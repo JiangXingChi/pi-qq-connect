@@ -239,7 +239,8 @@ export class QqBridge {
 			return;
 		}
 		const prompt = String(event?.prompt ?? "").trim();
-		if (prompt && prompt !== inflight.promptText.trim()) {
+		if (!prompt) return;
+		if (prompt !== inflight.promptText.trim()) {
 			inflight.foreign = true;
 			this.log.warn("本轮是终端里输入的消息，跳过收集");
 			return;

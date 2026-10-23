@@ -211,7 +211,12 @@ export default function createExtension(pi) {
 			}
 
 			if (config.lock) {
-				const lock = acquireLock(lockFilePath());
+				let lock = acquireLock(lockFilePath());
+				// 旧服务/上一个进程可能还在收尾，给它几秒释放锁，别让服务起来却永远连不上
+				for (let attempt = 0; !lock.ok && attempt < 4; attempt++) {
+					await sleep(1000);
+					lock = acquireLock(lockFilePath());
+				}
 				if (!lock.ok) {
 					state.error = `网关已被另一个 Pi 进程持有（pid ${lock.holder?.pid}）`;
 					setStatus(STATE_LABEL.locked, `pid ${lock.holder?.pid}`);

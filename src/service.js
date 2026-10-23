@@ -123,6 +123,16 @@ export function startService({ binPath, baseDir, cwd, sessionId = "pi-qqbot-serv
  * SIGTERM 并等它退出；不自动 SIGKILL。
  * 心跳已停但 pid 还活着时（可能是残留 pid 被复用），默认拒绝，需 force。
  */
+function looksLikeService(pid) {
+	// 非 Linux 或读不到 /proc 时不做判断，保持原行为
+	try {
+		const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ");
+		return /pi-qqbot/.test(cmdline);
+	} catch {
+		return true;
+	}
+}
+
 export async function stopService(state, { timeoutMs = 10_000, intervalMs = 200, force = false } = {}) {
 	if (!state || !isProcessAlive(state.pid)) return { stopped: true, reason: "already-exited" };
 	if (!force && !isServiceAlive(state)) {
@@ -130,6 +140,9 @@ export async function stopService(state, { timeoutMs = 10_000, intervalMs = 200,
 			stopped: false,
 			reason: `pid ${state.pid} 还活着但心跳已停，可能是别的进程复用了该 pid；确认后用 /qq stop --force`,
 		};
+	}
+	if (force && !looksLikeService(state.pid)) {
+		return { stopped: false, reason: `pid ${state.pid} 看起来不是 pi-qqbot，拒绝强制结束` };
 	}
 	try {
 		process.kill(state.pid, "SIGTERM");
