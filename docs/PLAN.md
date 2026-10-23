@@ -7,7 +7,7 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 
 ## 当前状态（开发副本，2026-10-22）
 
-- 版本 `0.2.3`，Node ≥ 22.19，零运行时依赖。
+- 版本 `0.2.4`，Node ≥ 22.19，零运行时依赖。
 - 验证：`npm test` 39 项全过；`npm run e2e` / `e2e:service` / `e2e:service-cmd` 三组真 pi 端到端全过。
 - 已实现：
   - QQ 私聊 + 群 @ 消息接入当前 Pi 会话，回答按被动回复发回
@@ -222,6 +222,18 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 | `/qq on` / `/qq off` | — | 删除，由 `start` / `stop` 覆盖 |
 | `/qq reconnect` / `/qq fresh` | — | 删除，网关自动重连；极端情况重启服务 |
 | `/qq take` | `/qq take` | 保留并写进帮助，标注“仅锁冲突时用”（不藏着） |
+
+## 开机自启（0.2.4）
+
+- systemd **用户级**单元：`packaging/pi-qqbot.service`，`WantedBy=default.target`；
+- PATH 显式包含 `%h/.local/bin`（pi）和 `/usr/sbin`（node），不依赖登录 shell；
+- `Restart=on-failure`：正常 `/qq stop`/`systemctl stop` 不会自动拉回，崩溃才重拉；
+- `KillMode=mixed` + `TimeoutStopSec=20`：先让启动器把 SIGTERM 转给 pi，超时才整组杀；
+- `loginctl enable-linger teacat`（本机已开）保证不登录也启动；
+- 网络未就绪不阻塞：网关自己按 1s→60s 退避重连。
+
+验证：`systemctl --user enable --now` 后 active、状态文件 0.2.3→0.2.4、网关 READY；
+`systemctl stop` 后状态文件清理，`start` 后重新 READY；`is-enabled=enabled`、`Linger=yes`。
 
 ## 角色矩阵审改（0.2.3）
 

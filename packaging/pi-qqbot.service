@@ -1,17 +1,22 @@
 [Unit]
 Description=pi-qqbot — QQ 官方机器人接入 Pi 会话
-After=network-online.target
-Wants=network-online.target
+# 用户级服务：配合 `loginctl enable-linger <user>` 在开机时启动。
+# 不用 network-online.target：用户管理器里通常没有这个 target；
+# 网络没就绪也没关系，网关会自己退避重连。
 
 [Service]
 Type=simple
-# 路径按需修改；--cwd 是 pi 的工作目录（QQ 里让 agent 干活的位置）
-# 源码安装用这个路径；npm 全局安装可改成 ExecStart=%h/.npm-global/bin/pi-qqbot --cwd %h
-ExecStart=%h/Agent/Core/系统/智能设定/Pi插件/pi-qqbot/bin/pi-qqbot.mjs --cwd %h
 WorkingDirectory=%h
-Restart=always
-RestartSec=5
 Environment=NO_COLOR=1
+# pi 在 ~/.local/bin，node 在 /usr/sbin；用户服务不会继承登录 shell 的 PATH
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+# --cwd 是 pi 的工作目录（QQ 里让 agent 干活的位置）；npm 全局安装可改成
+# ExecStart=%h/.npm-global/bin/pi-qqbot --cwd %h
+ExecStart=%h/Agent/Core/系统/智能设定/Pi插件/pi-qqbot/bin/pi-qqbot.mjs --cwd %h --session-id pi-qqbot-service
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=20
 
 [Install]
 WantedBy=default.target

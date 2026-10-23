@@ -129,13 +129,20 @@ QQ 侧只认一个命令：`/qq new`（可选带名字）。其余内容都当�
 ```
 
 它拉起 `pi --mode rpc --no-session --extension 本项目`，只要 stdin 不关 pi 就不退出。
-需要开机自启：
+需要开机自启（用户级服务 + linger，不用 sudo 装系统服务）：
 
 ```bash
 cp packaging/pi-qqbot.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now pi-qqbot
+loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机时启动
 ```
+
+- 单元里已把 `~/.local/bin` 和 `/usr/sbin` 加进 PATH，并固定 `--session-id pi-qqbot-service`。
+- 网络没就绪也无需处理：网关会按 1s→60s 退避重连，联网后自动上线。
+- 启用 systemd 后日常用 `systemctl --user start|stop|restart pi-qqbot`；
+  `/qq stop` 也会停掉它（干净退出，`Restart=on-failure` 不会自动拉回），下次开机再启动。
+- 开机自启与插件自己的 `/qq start` 不要同时管理：unit 在跑时 `/qq start` 只会提示已在运行。
 
 ## 配置项
 

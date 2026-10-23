@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4 — 2026-10-23
+
+- 开机自启：systemd 用户单元补齐 PATH、固定服务会话、`Restart=on-failure`、`KillMode=mixed`，
+  配合 `loginctl enable-linger` 在登录前启动；网络未就绪由网关退避重连。
+- 文档写明 systemd 与 `/qq start` 二选一的日常用法。
+
 ## 0.2.3 — 2026-10-23
 
 - 服务角色判断加 `ppid`：`QQBOT_SERVICE_PID` 会被服务里的工具子进程继承，只看环境变量会把孙进程
