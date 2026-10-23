@@ -238,7 +238,9 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 - `package.json`：去掉 `private`；`version 0.2.0`；加 `pi-package` 关键字、`bin`、`files` 白名单、
   `prepublishOnly: npm test`、`engines`；`repository/homepage` 等确认 GitHub 用户名后再补。
 - 迁移：停服务 → `mv` 正式目录 → 重建软链 → 发布 → 重启服务 → 验证 READY；开发副本目录同步改名。
-- 验证：`npm test` 36 项、`npm pack --dry-run` 白名单正确、真 pi `/qq help`、后台服务 READY、
-  `grep` 旧路径只在历史记录里出现。
+- 验证：`npm test` 36 项、`npm pack --dry-run` 24 个文件（40.1 kB）、真 pi `/qq help` 正常、
+  后台服务从新路径 READY、软链指向 `Core/应用/pi-qqbot`、旧中文目录已不存在、git 已初始化并打 `v0.2.0`。
+- 未做：GitHub 远程仓库与 npm 发布（本机 `gh` 未登录、`npm` 未登录），命令写在 README/DEVELOPMENT。
+
 
 
