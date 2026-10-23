@@ -41,7 +41,7 @@ npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
 npm run e2e:service       # 后台服务进程，不调模型
 npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop，不调模型
 ./scripts/publish-to-core.sh          # 语法 + 单测 + 差异预览（不改文件）
-./scripts/publish-to-core.sh --apply  # 备份正式版后发布到 ~/Agent/Core/应用/pi-qqbot
+./scripts/publish-to-core.sh --apply  # 备份正式版后发布到 ~/Agent/Core/系统/智能设定/Pi插件/pi-qqbot
 ```
 
 手工调试：
@@ -56,7 +56,7 @@ pi --extension ~/Agent/Temp/pi-qqbot-dev        # 用开发副本启动，不碰
 1. **零运行时依赖**：不要引入 npm 包。HTTP 用 `fetch`，WebSocket 用全局 `WebSocket`，
    加密用 `node:crypto`。依赖会让扩展在 `pi install` 之外无法加载。
 2. **不要改软链指向**：`~/.pi/agent/extensions/pi-qqbot` 永远指向正式目录
-   `~/Agent/Core/应用/pi-qqbot`。测试用 `--extension`，发布用 `scripts/publish-to-core.sh`。
+   `~/Agent/Core/系统/智能设定/Pi插件/pi-qqbot`。测试用 `--extension`，发布用 `scripts/publish-to-core.sh`。
 3. **凭据不进仓库**：AppID/AppSecret 只在 `~/.pi/agent/pi-qqbot.json`（0600）。
    代码、文档、测试、日志里都不许出现真实值。
 4. **发布只走 `scripts/publish-to-core.sh`**：手工 `cp -r` 会漏掉删除和校验。发布前必须

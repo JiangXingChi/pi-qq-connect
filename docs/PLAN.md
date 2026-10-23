@@ -243,7 +243,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 目标：项目名、目录、包元数据统一为可发布形态；运行逻辑不变。
 
 - 名称：`pi-qqbot`（npm 未占用；配置/锁/服务文件名已经是它）。
-- 目录：开发副本 `~/Agent/Temp/pi-qqbot-dev`；正式版 `~/Agent/Core/应用/pi-qqbot`。
+- 目录：开发副本 `~/Agent/Temp/pi-qqbot-dev`；正式版 `~/Agent/Core/系统/智能设定/Pi插件/pi-qqbot`。
 - 结构：
   - 根：`index.js`（Pi 入口，软链安装兼容）、`package.json`、`README.md` / `README.en.md`、`LICENSE`、`CHANGELOG.md`、`AGENTS.md`、`.gitignore`
   - `bin/` 启动器；`src/` 运行模块；`test/` 测试
@@ -254,7 +254,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
   `prepublishOnly: npm test`、`engines`；`repository/homepage` 等确认 GitHub 用户名后再补。
 - 迁移：停服务 → `mv` 正式目录 → 重建软链 → 发布 → 重启服务 → 验证 READY；开发副本目录同步改名。
 - 验证：`npm test` 38 项、`npm pack --dry-run` 24 个文件（40.1 kB）、真 pi `/qq help` 正常、
-  后台服务从新路径 READY、软链指向 `Core/应用/pi-qqbot`、旧中文目录已不存在、git 已初始化并打 `v0.2.0`。
+  后台服务从新路径 READY、软链指向 `Core/系统/智能设定/Pi插件/pi-qqbot`、旧中文目录已不存在、git 已初始化并打 `v0.2.0`。
 - 未做：GitHub 远程仓库与 npm 发布（本机 `gh` 未登录、`npm` 未登录），命令写在 README/DEVELOPMENT。
 
 

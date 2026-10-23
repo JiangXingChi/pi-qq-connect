@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把 Temp 下的开发副本发布回正式目录（默认 ~/Agent/Core/应用/pi-qqbot）。
+# 把 Temp 下的开发副本发布回正式目录（默认 ~/Agent/Core/系统/智能设定/Pi插件/pi-qqbot）。
 #
 #   ./scripts/publish-to-core.sh              # 只检查 + 预览差异，不改任何文件
 #   ./scripts/publish-to-core.sh --apply      # 备份正式版后真正发布
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-TARGET="${PUBLISH_TARGET:-$HOME/Agent/Core/应用/pi-qqbot}"
+TARGET="${PUBLISH_TARGET:-$HOME/Agent/Core/系统/智能设定/Pi插件/pi-qqbot}"
 BACKUP_ROOT="${PUBLISH_BACKUP_ROOT:-$HOME/Agent/BackUp}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 APPLY=0
