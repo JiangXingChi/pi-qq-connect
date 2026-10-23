@@ -25,9 +25,7 @@
     "chatbot",
     "bridge"
   ],
-  "bin": {
-    "pi-qq-connect": "./bin/pi-qq-connect.mjs"
-  },
+  "bin": "bin/pi-qq-connect.mjs",
   "pi": {
     "extensions": [
       "./index.js"
