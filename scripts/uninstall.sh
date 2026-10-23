@@ -2,8 +2,8 @@
 # 只卸载扩展挂载点；配置、日志、会话都保留。
 set -euo pipefail
 
-DEST="$HOME/.pi/agent/extensions/pi-qqbot"
-CONF="$HOME/.pi/agent/pi-qqbot.json"
+DEST="$HOME/.pi/agent/extensions/pi-qq-connect"
+CONF="$HOME/.pi/agent/pi-qq-connect.json"
 
 if [ -L "$DEST" ]; then
 	rm -f "$DEST"
@@ -17,5 +17,5 @@ else
 	echo "扩展未安装：$DEST"
 fi
 
-echo "保留：$CONF（含凭据）、$HOME/.pi/agent/pi-qqbot.log、$HOME/.pi/agent/pi-qqbot.lock"
+echo "保留：$CONF（含凭据）、$HOME/.pi/agent/pi-qq-connect.log、$HOME/.pi/agent/pi-qq-connect.lock"
 echo "确实不再需要时再手动删除。"

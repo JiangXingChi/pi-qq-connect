@@ -1,5 +1,5 @@
 /**
- * pi-qqbot：把 QQ 官方机器人接到当前 Pi 会话。
+ * pi-qq-connect：把 QQ 官方机器人接到当前 Pi 会话。
  *
  * QQ 里发的文字 → pi.sendUserMessage() → Pi 干完活 → 最终 assistant 文本被动回复到 QQ。
  * 所有消息都进同一个 Pi 会话，所以上下文是连续的。
@@ -28,7 +28,7 @@ import { QqBridge } from "./session.js";
 import { acquireLock, readLock, releaseLock } from "./lock.js";
 import { maskId, normalizeEvent } from "./text.js";
 
-const SERVICE_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "pi-qqbot.mjs");
+const SERVICE_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "pi-qq-connect.mjs");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function baseDir() {
@@ -36,7 +36,7 @@ function baseDir() {
 }
 
 function lockFilePath() {
-	return path.join(baseDir(), "pi-qqbot.lock");
+	return path.join(baseDir(), "pi-qq-connect.lock");
 }
 
 const STATE_LABEL = {
@@ -51,7 +51,7 @@ const STATE_LABEL = {
 	locked: "被占用",
 };
 
-const RUNTIME_KEY = Symbol.for("pi-qqbot.runtime.v1");
+const RUNTIME_KEY = Symbol.for("pi-qq-connect.runtime.v1");
 const root = globalThis;
 
 function newRuntime() {
@@ -107,14 +107,14 @@ export default function createExtension(pi) {
 	}
 
 	/**
-	 * 当前进程是不是状态文件里那个后台服务（bin 会注入 QQBOT_SERVICE_PID）。
+	 * 当前进程是不是状态文件里那个后台服务（bin 会注入 PIQQCONNECT_SERVICE_PID）。
 	 * 同时检查 ppid：这个环境变量会被服务里的工具子进程继承，只看 pid 会把孙进程也当成服务。
 	 */
 	function isServiceProcess(service) {
 		return Boolean(
-			process.env.QQBOT_SERVICE_PID &&
+			process.env.PIQQCONNECT_SERVICE_PID &&
 				service &&
-				String(service.pid) === process.env.QQBOT_SERVICE_PID &&
+				String(service.pid) === process.env.PIQQCONNECT_SERVICE_PID &&
 				process.ppid === service.pid,
 		);
 	}
@@ -188,14 +188,14 @@ export default function createExtension(pi) {
 			if (!exists || error) {
 				state.error = error;
 				setStatus(STATE_LABEL.unconfigured, path.basename(configFile));
-				notify(`pi-qqbot: ${error}\n示例配置见项目内 examples/config.json`, "warning");
+				notify(`pi-qq-connect: ${error}\n示例配置见项目内 examples/config.json`, "warning");
 				return;
 			}
-			for (const warning of warnings) notify(`pi-qqbot: ${warning}`, "info");
+			for (const warning of warnings) notify(`pi-qq-connect: ${warning}`, "info");
 
 			if (!config.enabled) {
 				setStatus(STATE_LABEL.disabled);
-				notify("pi-qqbot: 配置里 enabled=false，未连接", "info");
+				notify("pi-qq-connect: 配置里 enabled=false，未连接", "info");
 				return;
 			}
 
@@ -206,7 +206,7 @@ export default function createExtension(pi) {
 			const iAmService = isServiceProcess(service);
 			if (serviceAlive && !iAmService) {
 				setStatus("服务在线", `pid ${service.pid}`);
-				notify(`pi-qqbot: 后台服务在线（pid ${service.pid}），本进程不连网关。用 /qq status 查看`, "info");
+				notify(`pi-qq-connect: 后台服务在线（pid ${service.pid}），本进程不连网关。用 /qq status 查看`, "info");
 				return;
 			}
 
@@ -220,15 +220,15 @@ export default function createExtension(pi) {
 				if (!lock.ok) {
 					state.error = `网关已被另一个 Pi 进程持有（pid ${lock.holder?.pid}）`;
 					setStatus(STATE_LABEL.locked, `pid ${lock.holder?.pid}`);
-					notify(`pi-qqbot: ${state.error}。关掉那个进程，或在终端运行 /qq take 强制接管。`, "warning");
+					notify(`pi-qq-connect: ${state.error}。关掉那个进程，或在终端运行 /qq take 强制接管。`, "warning");
 					return;
 				}
-				if (lock.takenOver) notify("pi-qqbot: 已强制接管网关", "info");
+				if (lock.takenOver) notify("pi-qq-connect: 已强制接管网关", "info");
 				// 别的进程 /qq take 后，这里要让出网关，否则两个进程各收一半消息
 				state.lockWatch = setInterval(() => {
 					const holder = readLock(lockFilePath());
 					if (holder && holder.pid !== process.pid) {
-						notify(`pi-qqbot: 网关已被 pid ${holder.pid} 接管，本进程断开`, "warning");
+						notify(`pi-qq-connect: 网关已被 pid ${holder.pid} 接管，本进程断开`, "warning");
 						stop({ release: false });
 						setStatus(STATE_LABEL.locked, `pid ${holder.pid}`);
 					}
@@ -239,7 +239,7 @@ export default function createExtension(pi) {
 			// 配置里有明文密钥：权限过宽时提醒一次
 			try {
 				const mode = fs.statSync(configFile).mode & 0o777;
-				if (mode & 0o077) notify(`pi-qqbot: 配置权限是 0${mode.toString(8)}，建议 chmod 600 ${configFile}`, "warning");
+				if (mode & 0o077) notify(`pi-qq-connect: 配置权限是 0${mode.toString(8)}，建议 chmod 600 ${configFile}`, "warning");
 			} catch {
 				// ignore
 			}
@@ -380,7 +380,7 @@ export default function createExtension(pi) {
 			binPath: SERVICE_BIN,
 			baseDir: baseDir(),
 			cwd: state.ctx?.cwd ?? process.cwd(),
-			sessionId: "pi-qqbot-service",
+			sessionId: "pi-qq-connect-service",
 		});
 		if (error || !pid) {
 			notify(
@@ -396,7 +396,7 @@ export default function createExtension(pi) {
 		}
 		if (current && isServiceAlive(current)) {
 			notify(
-				`后台服务已启动：${describeService(current)}\nQQ 会话切换到 pi-qqbot-service（上下文从空开始）\n日志：${startedLog}`,
+				`后台服务已启动：${describeService(current)}\nQQ 会话切换到 pi-qq-connect-service（上下文从空开始）\n日志：${startedLog}`,
 				"info",
 			);
 			setStatus("服务在线", `pid ${current.pid}`);

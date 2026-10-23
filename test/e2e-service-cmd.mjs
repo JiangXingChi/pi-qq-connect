@@ -13,7 +13,7 @@ import { isServiceAlive, readServiceState, serviceStatePath } from "../src/servi
 import { startMockQq } from "./mock-qq.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qqbot-svccmd-"));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-svccmd-"));
 const configPath = path.join(dir, "config.json");
 const sessionDir = path.join(dir, "sessions");
 fs.mkdirSync(sessionDir, { recursive: true });
@@ -37,7 +37,7 @@ fs.writeFileSync(
 
 const child = spawn("pi", ["--mode", "rpc", "--session-dir", sessionDir, "--no-extensions", "--extension", root], {
 	cwd: dir,
-	env: { ...process.env, QQBOT_CONFIG: configPath },
+	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
 	stdio: ["pipe", "pipe", "pipe"],
 });
 let output = "";

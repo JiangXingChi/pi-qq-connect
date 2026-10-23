@@ -3,7 +3,7 @@ node_modules/
 *.tgz
 .DS_Store
 .env
-/pi-qqbot.json
+/pi-qq-connect.json
 sessions/
 test/tmp-*
 .pi/

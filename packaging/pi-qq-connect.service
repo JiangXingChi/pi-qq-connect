@@ -1,5 +1,5 @@
 [Unit]
-Description=pi-qqbot — QQ 官方机器人接入 Pi 会话
+Description=pi-qq-connect — QQ 官方机器人接入 Pi 会话
 StartLimitIntervalSec=60
 StartLimitBurst=3
 # 用户级服务：配合 `loginctl enable-linger <user>` 在开机时启动。
@@ -13,8 +13,8 @@ Environment=NO_COLOR=1
 # pi 在 ~/.local/bin，node 在 /usr/sbin；用户服务不会继承登录 shell 的 PATH
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 # --cwd 是 pi 的工作目录（QQ 里让 agent 干活的位置）；npm 全局安装可改成
-# ExecStart=%h/.npm-global/bin/pi-qqbot --cwd %h
-ExecStart=%h/Agent/Core/系统/智能设定/Pi插件/pi-qqbot/bin/pi-qqbot.mjs --cwd %h --session-id pi-qqbot-service
+# ExecStart=%h/.npm-global/bin/pi-qq-connect --cwd %h
+ExecStart=%h/Agent/Core/系统/智能设定/Pi插件/pi-qq-connect/bin/pi-qq-connect.mjs --cwd %h --session-id pi-qq-connect-service
 Restart=on-failure
 RestartSec=5
 KillMode=mixed

@@ -40,7 +40,7 @@ const DENY = [
 	/(^|\/)\.git-credentials$/i,
 	/(^|\/)\.docker\/config\.json$/i,
 	/(^|\/)\.kube\/config$/i,
-	/(^|\/)pi-qqbot\.json$/,
+	/(^|\/)pi-qq-connect\.json$/,
 	/(^|\/)id_(rsa|ed25519|ecdsa)$/,
 	/\.pem$/i,
 	/\.key$/i,

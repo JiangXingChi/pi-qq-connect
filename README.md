@@ -1,7 +1,7 @@
-# pi-qqbot
+# pi-qq-connect
 
-[![npm](https://img.shields.io/npm/v/pi-qqbot)](https://www.npmjs.com/package/pi-qqbot)
-[![license](https://img.shields.io/npm/l/pi-qqbot)](LICENSE)
+[![npm](https://img.shields.io/npm/v/pi-qq-connect)](https://www.npmjs.com/package/pi-qq-connect)
+[![license](https://img.shields.io/npm/l/pi-qq-connect)](LICENSE)
 [English](README.en.md)
 
 把 **QQ 官方机器人**接到**当前 Pi 会话**的插件。零运行时依赖，只用 Node ≥22.19 自带的
@@ -32,14 +32,14 @@
 从 npm（推荐）：
 
 ```bash
-pi install npm:pi-qqbot
+pi install npm:pi-qq-connect
 ```
 
 从源码作为包安装：
 
 ```bash
-git clone https://github.com/<you>/pi-qqbot.git
-cd pi-qqbot
+git clone https://github.com/<you>/pi-qq-connect.git
+cd pi-qq-connect
 pi install .
 ```
 
@@ -51,8 +51,8 @@ pi install .
 
 已用 `pi install` 装过时，`install.sh` 会检测到并拒绝执行。
 
-它会软链到 `~/.pi/agent/extensions/pi-qqbot`，并在不存在时生成一份
-`~/.pi/agent/pi-qqbot.json`（权限 600）。填配置：
+它会软链到 `~/.pi/agent/extensions/pi-qq-connect`，并在不存在时生成一份
+`~/.pi/agent/pi-qq-connect.json`（权限 600）。填配置：
 
 ```json
 {
@@ -105,7 +105,7 @@ QQ 侧只认一个命令：`/qq new`（可选带名字）。其余内容都当�
 
 ### 后台常驻服务（推荐）
 
-插件自己管一个后台 pi，QQ 会话固定落在 `pi-qqbot-service` 这条会话上，不用一直开着 TUI：
+插件自己管一个后台 pi，QQ 会话固定落在 `pi-qq-connect-service` 这条会话上，不用一直开着 TUI：
 
 ```bash
 /qq start     # 拉起后台 pi（detached，父进程退出也不停）
@@ -114,8 +114,8 @@ QQ 侧只认一个命令：`/qq new`（可选带名字）。其余内容都当�
 ```
 
 - 后台服务在线时，TUI 里的插件只当控制面：不连网关、不抢锁，状态栏显示「QQ: 服务在线」。
-- 状态文件 `~/.pi/agent/pi-qqbot.service.json`（15 秒一次心跳），日志
-  `~/.pi/agent/pi-qqbot.service.log`。
+- 状态文件 `~/.pi/agent/pi-qq-connect.service.json`（15 秒一次心跳），日志
+  `~/.pi/agent/pi-qq-connect.service.log`。
 - 心跳超过 45 秒没更新就判定掉线，可 `/qq start` 重拉。
 - 已有健康服务时，第二个实例会自己退出，不会出现两个 pi 抢网关。
 - 状态文件里的 pid 还活着但心跳已停（可能是 pid 被复用），`/qq stop` 会拒绝发信号；
@@ -125,24 +125,24 @@ QQ 侧只认一个命令：`/qq new`（可选带名字）。其余内容都当�
 ### 前台常驻 / systemd
 
 ```bash
-./bin/pi-qqbot.mjs --cwd ~            # 前台跑
+./bin/pi-qq-connect.mjs --cwd ~            # 前台跑
 ```
 
-它拉起 `pi --mode rpc --session-id pi-qqbot-service --extension 本项目`，只要 stdin 不关 pi 就不退出。
+它拉起 `pi --mode rpc --session-id pi-qq-connect-service --extension 本项目`，只要 stdin 不关 pi 就不退出。
 需要开机自启（用户级服务 + linger，不用 sudo 装系统服务）：
 
 ```bash
-cp packaging/pi-qqbot.service ~/.config/systemd/user/
+cp packaging/pi-qq-connect.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now pi-qqbot
+systemctl --user enable --now pi-qq-connect
 loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机时启动
 ```
 
-- 单元里已把 `~/.local/bin` 和 `/usr/sbin` 加进 PATH，并固定 `--session-id pi-qqbot-service`。
+- 单元里已把 `~/.local/bin` 和 `/usr/sbin` 加进 PATH，并固定 `--session-id pi-qq-connect-service`。
 - 单元默认指向本机源码路径；npm 全局安装的用户把 `ExecStart` 改成
-  `%h/.npm-global/bin/pi-qqbot --cwd %h --session-id pi-qqbot-service`（路径以 `npm bin -g` 为准）。
+  `%h/.npm-global/bin/pi-qq-connect --cwd %h --session-id pi-qq-connect-service`（路径以 `npm bin -g` 为准）。
 - 网络没就绪也无需处理：网关会按 1s→60s 退避重连，联网后自动上线。
-- 启用 systemd 后日常用 `systemctl --user start|stop|restart pi-qqbot`；
+- 启用 systemd 后日常用 `systemctl --user start|stop|restart pi-qq-connect`；
   `/qq stop` 也会停掉它（干净退出，`Restart=on-failure` 不会自动拉回），下次开机再启动。
 - 开机自启与插件自己的 `/qq start` 不要同时管理：unit 在跑时 `/qq start` 只会提示已在运行。
 
@@ -151,7 +151,7 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | true | 总开关 |
-| `appId` / `clientSecret` | — | 开放平台凭据（也可用 `QQBOT_APP_ID` / `QQBOT_CLIENT_SECRET`） |
+| `appId` / `clientSecret` | — | 开放平台凭据（也可用 `PIQQCONNECT_APP_ID` / `PIQQCONNECT_CLIENT_SECRET`） |
 | `sandbox` | false | 沙箱环境 |
 | `allowAll` | false | 放开所有人（自用临时调试用） |
 | `allowUsers` / `allowGroups` | [] | openid 白名单，支持 `*` 结尾前缀匹配 |
@@ -165,12 +165,12 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 | `ackAfterMs` | 0 | >0 时长任务先回「收到，正在处理…」（占一次额度） |
 | `passiveWindowSec` | 群 300 / 单聊 3600 | 被动回复窗口 |
 | `images.maxCount/maxBytes` | 2 / 8MB | 入站图片限制 |
-| `lock` | true | 单实例锁（`~/.pi/agent/pi-qqbot.lock`） |
-| `log.file/level` | `~/.pi/agent/pi-qqbot.log` / info | 日志 |
+| `lock` | true | 单实例锁（`~/.pi/agent/pi-qq-connect.lock`） |
+| `log.file/level` | `~/.pi/agent/pi-qq-connect.log` / info | 日志 |
 | `endpoints` | 空 | 测试用：覆盖 token / api / 网关地址 |
 
-环境变量：`QQBOT_CONFIG`、`QQBOT_APP_ID`、`QQBOT_CLIENT_SECRET`、`QQBOT_SANDBOX=1`、
-`QQBOT_DISABLED=1`。
+环境变量：`PIQQCONNECT_CONFIG`、`PIQQCONNECT_APP_ID`、`PIQQCONNECT_CLIENT_SECRET`、`PIQQCONNECT_SANDBOX=1`、
+`PIQQCONNECT_DISABLED=1`。
 
 ## 必须知道的限制
 

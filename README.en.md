@@ -1,7 +1,7 @@
-# pi-qqbot
+# pi-qq-connect
 
-[![npm](https://img.shields.io/npm/v/pi-qqbot)](https://www.npmjs.com/package/pi-qqbot)
-[![license](https://img.shields.io/npm/l/pi-qqbot)](LICENSE)
+[![npm](https://img.shields.io/npm/v/pi-qq-connect)](https://www.npmjs.com/package/pi-qq-connect)
+[![license](https://img.shields.io/npm/l/pi-qq-connect)](LICENSE)
 [中文](README.md)
 
 Bridge the **official QQ bot platform** to the **current Pi session**. Zero runtime dependencies
@@ -17,18 +17,18 @@ Bridge the **official QQ bot platform** to the **current Pi session**. Zero runt
 ## Install
 
 ```bash
-pi install npm:pi-qqbot
+pi install npm:pi-qq-connect
 ```
 
 Or from a checkout:
 
 ```bash
-git clone https://github.com/<you>/pi-qqbot.git
-cd pi-qqbot
+git clone https://github.com/<you>/pi-qq-connect.git
+cd pi-qq-connect
 pi install .
 ```
 
-Create `~/.pi/agent/pi-qqbot.json` (chmod 600) with your AppID/AppSecret; see
+Create `~/.pi/agent/pi-qq-connect.json` (chmod 600) with your AppID/AppSecret; see
 [`examples/config.json`](examples/config.json). `sandbox: true` while testing, then add your
 openid to `allowUsers` and turn `allowAll` off.
 

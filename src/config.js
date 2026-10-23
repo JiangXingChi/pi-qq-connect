@@ -1,7 +1,7 @@
 /**
- * 配置加载：~/.pi/agent/pi-qqbot.json + 环境变量覆盖。
+ * 配置加载：~/.pi/agent/pi-qq-connect.json + 环境变量覆盖。
  *
- * 环境变量：QQBOT_CONFIG / QQBOT_APP_ID / QQBOT_CLIENT_SECRET / QQBOT_SANDBOX / QQBOT_DISABLED
+ * 环境变量：PIQQCONNECT_CONFIG / PIQQCONNECT_APP_ID / PIQQCONNECT_CLIENT_SECRET / PIQQCONNECT_SANDBOX / PIQQCONNECT_DISABLED
  */
 
 import fs from "node:fs";
@@ -15,9 +15,9 @@ export function expandHome(p) {
 	return p;
 }
 
-/** 每次调用都重新读取 QQBOT_CONFIG，便于测试与运行中切换。 */
+/** 每次调用都重新读取 PIQQCONNECT_CONFIG，便于测试与运行中切换。 */
 export function configPath() {
-	return expandHome(process.env.QQBOT_CONFIG) || path.join(os.homedir(), ".pi/agent", "pi-qqbot.json");
+	return expandHome(process.env.PIQQCONNECT_CONFIG) || path.join(os.homedir(), ".pi/agent", "pi-qq-connect.json");
 }
 
 export const DEFAULT_CONFIG = Object.freeze({
@@ -43,7 +43,7 @@ export const DEFAULT_CONFIG = Object.freeze({
 	images: { enabled: true, maxCount: 2, maxBytes: 8 * 1024 * 1024 },
 	files: { enabled: true, maxCount: 3, maxBytes: 200 * 1024 * 1024, allowDirs: [] },
 	lock: true,
-	log: { file: "~/.pi/agent/pi-qqbot.log", level: "info", maxBytes: 2 * 1024 * 1024 },
+	log: { file: "~/.pi/agent/pi-qq-connect.log", level: "info", maxBytes: 2 * 1024 * 1024 },
 	endpoints: { token: "", api: "", gateway: "" },
 });
 
@@ -149,10 +149,10 @@ export function normalizeConfig(raw = {}) {
 }
 
 function applyEnv(cfg) {
-	if (process.env.QQBOT_APP_ID) cfg.appId = process.env.QQBOT_APP_ID.trim();
-	if (process.env.QQBOT_CLIENT_SECRET) cfg.clientSecret = process.env.QQBOT_CLIENT_SECRET.trim();
-	if (/^(1|true|yes)$/i.test(process.env.QQBOT_SANDBOX ?? "")) cfg.sandbox = true;
-	if (/^(1|true|yes)$/i.test(process.env.QQBOT_DISABLED ?? "")) cfg.enabled = false;
+	if (process.env.PIQQCONNECT_APP_ID) cfg.appId = process.env.PIQQCONNECT_APP_ID.trim();
+	if (process.env.PIQQCONNECT_CLIENT_SECRET) cfg.clientSecret = process.env.PIQQCONNECT_CLIENT_SECRET.trim();
+	if (/^(1|true|yes)$/i.test(process.env.PIQQCONNECT_SANDBOX ?? "")) cfg.sandbox = true;
+	if (/^(1|true|yes)$/i.test(process.env.PIQQCONNECT_DISABLED ?? "")) cfg.enabled = false;
 	return cfg;
 }
 

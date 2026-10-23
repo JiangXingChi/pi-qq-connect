@@ -1,5 +1,5 @@
 /**
- * 后台服务端到端：启动 bin/pi-qqbot.mjs（detached 的常驻 pi），
+ * 后台服务端到端：启动 bin/pi-qq-connect.mjs（detached 的常驻 pi），
  * 验证它写状态+心跳、连上网关、SIGTERM 后清理，不调用模型。
  *
  * 跑法：node test/e2e-service.mjs
@@ -15,7 +15,7 @@ import { isServiceAlive, readServiceState, serviceStatePath } from "../src/servi
 import { startMockQq } from "./mock-qq.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qqbot-svc-"));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-svc-"));
 const configPath = path.join(dir, "config.json");
 const sessionDir = path.join(dir, "sessions");
 fs.mkdirSync(sessionDir, { recursive: true });
@@ -37,9 +37,9 @@ fs.writeFileSync(
 	),
 );
 
-const child = spawn(process.execPath, [path.join(root, "bin", "pi-qqbot.mjs"), "--cwd", dir, "--session-id", "pi-qq-e2e-service"], {
+const child = spawn(process.execPath, [path.join(root, "bin", "pi-qq-connect.mjs"), "--cwd", dir, "--session-id", "pi-qq-e2e-service"], {
 	cwd: dir,
-	env: { ...process.env, QQBOT_CONFIG: configPath },
+	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
 	stdio: ["ignore", "pipe", "pipe"],
 });
 let output = "";
@@ -77,9 +77,9 @@ if (state.pid !== child.pid) {
 }
 
 // 第二个服务实例应被拒绝
-const second = spawn(process.execPath, [path.join(root, "bin", "pi-qqbot.mjs"), "--cwd", dir, "--session-id", "dup"], {
+const second = spawn(process.execPath, [path.join(root, "bin", "pi-qq-connect.mjs"), "--cwd", dir, "--session-id", "dup"], {
 	cwd: dir,
-	env: { ...process.env, QQBOT_CONFIG: configPath },
+	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
 	stdio: ["ignore", "pipe", "pipe"],
 });
 const secondExit = await new Promise((resolve) => {

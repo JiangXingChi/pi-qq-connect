@@ -357,7 +357,7 @@ export class QqGateway {
 				token: `QQBot ${token}`,
 				intents: this.intents,
 				shard: [0, 1],
-				properties: { $os: process.platform, $browser: "pi-qqbot", $device: "pi-qqbot" },
+				properties: { $os: process.platform, $browser: "pi-qq-connect", $device: "pi-qq-connect" },
 				},
 				}, ws);
 				}

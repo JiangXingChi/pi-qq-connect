@@ -25,7 +25,7 @@
     "allowDirs": []
   },
   "log": {
-    "file": "~/.pi/agent/pi-qqbot.log",
+    "file": "~/.pi/agent/pi-qq-connect.log",
     "level": "info"
   },
   "endpoints": {

@@ -1,10 +1,10 @@
 {
-  "name": "pi-qqbot",
+  "name": "pi-qq-connect",
   "version": "0.2.8",
   "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻",
   "type": "module",
   "license": "MIT",
-  "author": "pi-qqbot contributors",
+  "author": "pi-qq-connect contributors",
   "engines": {
     "node": ">=22.19.0"
   },
@@ -18,7 +18,7 @@
     "bridge"
   ],
   "bin": {
-    "pi-qqbot": "./bin/pi-qqbot.mjs"
+    "pi-qq-connect": "./bin/pi-qq-connect.mjs"
   },
   "pi": {
     "extensions": [

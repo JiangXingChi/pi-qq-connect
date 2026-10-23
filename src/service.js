@@ -1,7 +1,7 @@
 /**
  * 后台常驻服务管理：一个独立的 `pi --mode rpc` 进程承载 QQ 会话。
  *
- * - `bin/pi-qqbot.mjs` 启动后写状态文件并每 15 秒打一次心跳
+ * - `bin/pi-qq-connect.mjs` 启动后写状态文件并每 15 秒打一次心跳
  * - 插件读状态文件判断服务是否在线；在线时自己不再连网关（避免双开抢消息）
  * - `/qq start|stop` 通过 detached spawn / SIGTERM 管理它
  */
@@ -13,11 +13,11 @@ import path from "node:path";
 const HEARTBEAT_STALE_MS = 45_000;
 
 export function serviceStatePath(baseDir) {
-	return path.join(baseDir, "pi-qqbot.service.json");
+	return path.join(baseDir, "pi-qq-connect.service.json");
 }
 
 export function serviceLogPath(baseDir) {
-	return path.join(baseDir, "pi-qqbot.service.log");
+	return path.join(baseDir, "pi-qq-connect.service.log");
 }
 
 export function readServiceState(file) {
@@ -79,7 +79,7 @@ export function describeService(state, { now = Date.now(), staleMs = HEARTBEAT_S
  * 拉起后台服务（detached，父进程退出后仍在）。
  * @returns {{pid:number|null, logFile:string}}
  */
-export function startService({ binPath, baseDir, cwd, sessionId = "pi-qqbot-service", nodePath = process.execPath }) {
+export function startService({ binPath, baseDir, cwd, sessionId = "pi-qq-connect-service", nodePath = process.execPath }) {
 	const logFile = serviceLogPath(baseDir);
 	if (!fs.existsSync(binPath)) {
 		return { pid: null, logFile, error: `找不到启动脚本：${binPath}` };
@@ -105,7 +105,7 @@ export function startService({ binPath, baseDir, cwd, sessionId = "pi-qqbot-serv
 		// spawn 的失败是异步 error 事件；没有监听器会直接打崩调用方（TUI）
 		child.on("error", (err) => {
 			try {
-				fs.appendFileSync(logFile, `[pi-qqbot] spawn 失败：${err?.message ?? err}\n`);
+				fs.appendFileSync(logFile, `[pi-qq-connect] spawn 失败：${err?.message ?? err}\n`);
 			} catch {
 				// ignore
 			}
@@ -133,7 +133,7 @@ function looksLikeService(pid) {
 	// 非 Linux 或读不到 /proc 时不做判断，保持原行为
 	try {
 		const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ");
-		return /pi-qqbot/.test(cmdline);
+		return /pi-qq-connect/.test(cmdline);
 	} catch {
 		return true;
 	}
@@ -148,7 +148,7 @@ export async function stopService(state, { timeoutMs = 10_000, intervalMs = 200,
 		};
 	}
 	if (force && !looksLikeService(state.pid)) {
-		return { stopped: false, reason: `pid ${state.pid} 看起来不是 pi-qqbot，拒绝强制结束` };
+		return { stopped: false, reason: `pid ${state.pid} 看起来不是 pi-qq-connect，拒绝强制结束` };
 	}
 	try {
 		process.kill(state.pid, "SIGTERM");

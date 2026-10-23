@@ -23,7 +23,7 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
 | 文件 | 职责 |
 |---|---|
 | `src/index.js` | 扩展入口：`session_start` / `session_shutdown`、`/qq` 命令、进程级单例、服务检测 |
-| `src/config.js` | 读取 `~/.pi/agent/pi-qqbot.json`，归一化、校验、环境变量覆盖 |
+| `src/config.js` | 读取 `~/.pi/agent/pi-qq-connect.json`，归一化、校验、环境变量覆盖 |
 | `src/auth.js` | AppID/AppSecret → access_token，缓存与并发去重 |
 | `src/api.js` | 网关地址、消息、Markdown、typing、富媒体上传与发送 |
 | `src/gateway.js` | 零依赖 WebSocket：Hello/Identify/Resume/心跳/重连/关闭码分类 |
@@ -33,7 +33,7 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
 | `src/service.js` | 后台常驻服务状态文件、心跳、起停、stale pid 处理 |
 | `src/lock.js` | 单实例锁 + 看门狗 |
 | `src/log.js` | 文件日志、级别过滤、2 MiB 轮转 |
-| `bin/pi-qqbot.mjs` | detached 启动 `pi --mode rpc --session-id pi-qqbot-service --extension <dir>` |
+| `bin/pi-qq-connect.mjs` | detached 启动 `pi --mode rpc --session-id pi-qq-connect-service --extension <dir>` |
 
 ## 一次消息的生命周期
 
@@ -60,27 +60,27 @@ QQ 里发 `/qq new`：桥拦截，不注入模型，改用
 |---|---|---|
 | 普通 TUI（无服务） | 状态文件不存在/心跳过期 | 连网关、持锁 |
 | TUI 控制面（服务在线） | 状态文件健康，且不是服务进程 | 不连网关、不抢锁，只执行 `/qq status/start/stop` |
-| 后台服务进程 | `QQBOT_SERVICE_PID === 状态文件 pid` **且** `ppid === 状态文件 pid` | 连网关；`/qq new` 放行 |
+| 后台服务进程 | `PIQQCONNECT_SERVICE_PID === 状态文件 pid` **且** `ppid === 状态文件 pid` | 连网关；`/qq new` 放行 |
 
 只比对环境变量不够：服务里的工具子进程会继承它，孙进程会被误认成服务。`ppid` 检查
 把范围限定在启动器直接拉起的那一个 `pi` 子进程。
 
 ## 后台服务
 
-`/qq start` 让当前进程先让出网关和锁，再 detached 拉起 `bin/pi-qqbot.mjs`，它执行
-`pi --mode rpc --session-id pi-qqbot-service --extension <dir>` 并保持 stdin 打开。服务每 15 秒写心跳到
-`~/.pi/agent/pi-qqbot.service.json`；超过 45 秒未更新视为掉线。TUI 里的扩展检测到服务在线时
+`/qq start` 让当前进程先让出网关和锁，再 detached 拉起 `bin/pi-qq-connect.mjs`，它执行
+`pi --mode rpc --session-id pi-qq-connect-service --extension <dir>` 并保持 stdin 打开。服务每 15 秒写心跳到
+`~/.pi/agent/pi-qq-connect.service.json`；超过 45 秒未更新视为掉线。TUI 里的扩展检测到服务在线时
 只做控制面，不连网关、不抢锁。
 
 ## 状态文件
 
 | 路径 | 内容 |
 |---|---|
-| `~/.pi/agent/pi-qqbot.json` | 配置（含凭据，权限 600） |
-| `~/.pi/agent/pi-qqbot.log` | 运行日志（轮转 `.1`） |
-| `~/.pi/agent/pi-qqbot.lock` | 网关单实例锁（pid/host/at） |
-| `~/.pi/agent/pi-qqbot.service.json` | 后台服务 pid、会话、心跳 |
-| `~/.pi/agent/pi-qqbot.service.log` | 服务 stdout/stderr |
+| `~/.pi/agent/pi-qq-connect.json` | 配置（含凭据，权限 600） |
+| `~/.pi/agent/pi-qq-connect.log` | 运行日志（轮转 `.1`） |
+| `~/.pi/agent/pi-qq-connect.lock` | 网关单实例锁（pid/host/at） |
+| `~/.pi/agent/pi-qq-connect.service.json` | 后台服务 pid、会话、心跳 |
+| `~/.pi/agent/pi-qq-connect.service.log` | 服务 stdout/stderr |
 
 ## 安全边界
 

@@ -604,7 +604,7 @@ test("锁：活进程占用时拒绝，force 可接管", () => {
 test("集成：扩展 → 网关 → 注入 → 回 QQ", async () => {
 	const configPath = tempConfigPath();
 	const mock = await startMockQq();
-	process.env.QQBOT_CONFIG = configPath;
+	process.env.PIQQCONNECT_CONFIG = configPath;
 	writeConfig(configPath, {
 		appId: "1234567890",
 		clientSecret: "test-secret",
@@ -686,8 +686,8 @@ test("集成：扩展 → 网关 → 注入 → 回 QQ", async () => {
 test("集成：后台服务在线时本地不抢网关", async () => {
 	const configPath = tempConfigPath();
 	const mock = await startMockQq();
-	process.env.QQBOT_CONFIG = configPath;
-	delete process.env.QQBOT_SERVICE_PID;
+	process.env.PIQQCONNECT_CONFIG = configPath;
+	delete process.env.PIQQCONNECT_SERVICE_PID;
 	writeConfig(configPath, {
 		appId: "1234567890",
 		clientSecret: "test-secret",
@@ -701,7 +701,7 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 		pid: process.pid,
 		startedAt: new Date().toISOString(),
 		heartbeatAt: new Date().toISOString(),
-		sessionId: "pi-qqbot-service",
+		sessionId: "pi-qq-connect-service",
 	});
 
 	const { default: createExtension, resetRuntimeForTests } = await import("../src/index.js");
@@ -725,12 +725,12 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 
 	// 环境变量被工具子进程继承、但 ppid 不对：仍按 TUI 处理，不许借服务身份绕过
 	const beforeSpoof = ctx.newSessions.length;
-	process.env.QQBOT_SERVICE_PID = String(process.pid);
+	process.env.PIQQCONNECT_SERVICE_PID = String(process.pid);
 	try {
 		await fake.commands.get("qq").handler("new", ctx);
 		assert.equal(ctx.newSessions.length, beforeSpoof, "只有 ppid 对得上的服务进程才放行");
 	} finally {
-		delete process.env.QQBOT_SERVICE_PID;
+		delete process.env.PIQQCONNECT_SERVICE_PID;
 	}
 
 	// 服务进程自己执行 /qq new 时必须放行（QQ 侧的 /qq new 就是走到这里）。
@@ -739,14 +739,14 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 		pid: process.ppid,
 		startedAt: new Date().toISOString(),
 		heartbeatAt: new Date().toISOString(),
-		sessionId: "pi-qqbot-service",
+		sessionId: "pi-qq-connect-service",
 	});
-	process.env.QQBOT_SERVICE_PID = String(process.ppid);
+	process.env.PIQQCONNECT_SERVICE_PID = String(process.ppid);
 	try {
 		await fake.commands.get("qq").handler("new", ctx);
 		assert.equal(ctx.newSessions.length, 1, "服务进程自己的 /qq new 应切换会话");
 	} finally {
-		delete process.env.QQBOT_SERVICE_PID;
+		delete process.env.PIQQCONNECT_SERVICE_PID;
 	}
 
 	removeServiceState(serviceFile);
@@ -757,7 +757,7 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 test("集成：缺配置时不连接并给出提示", async () => {
 	const configPath = tempConfigPath();
 	fs.rmSync(configPath, { force: true });
-	process.env.QQBOT_CONFIG = configPath;
+	process.env.PIQQCONNECT_CONFIG = configPath;
 	const { default: createExtension } = await import("../src/index.js");
 	const fake = createFakePi();
 	const ctx = createFakeCtx();

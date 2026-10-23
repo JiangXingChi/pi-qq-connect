@@ -20,7 +20,7 @@
 ## 0.2.6 — 2026-10-23
 
 - `/qq start` 拉起的服务在锁被旧进程短暂占着时会等最多 4 秒重试，避免“心跳在线但网关没连上”。
-- `/qq stop --force` 在 Linux 上校验 `/proc/<pid>/cmdline` 含 `pi-qqbot`，pid 被无关进程复用时拒绝结束。
+- `/qq stop --force` 在 Linux 上校验 `/proc/<pid>/cmdline` 含 `pi-qq-connect`，pid 被无关进程复用时拒绝结束。
 - `before_agent_start` 没有 prompt 时不误判为 QQ 轮次开始。
 - 文档修正：`--session-id`（不是 `--no-session`）、`/qq new` 不会中断正在跑的轮次、npm tarball 包含 PLAN、systemd 单元路径说明。
 
@@ -53,7 +53,7 @@
 
 ## 0.2.3 — 2026-10-23
 
-- 服务角色判断加 `ppid`：`QQBOT_SERVICE_PID` 会被服务里的工具子进程继承，只看环境变量会把孙进程
+- 服务角色判断加 `ppid`：`PIQQCONNECT_SERVICE_PID` 会被服务里的工具子进程继承，只看环境变量会把孙进程
   当成服务；现在必须是启动器直接拉起的那个 pi 子进程。
 - `/qq new` 的角色矩阵补测试：TUI 控制面拒绝、服务进程放行、环境变量被继承的孙进程仍拒绝。
 - 日志脱敏：API 错误里的 openid 和会话日志里的 chatId 都打码（之前会写完整 ID）。
@@ -64,7 +64,7 @@
 ## 0.2.2 — 2026-10-23
 
 - 修复 QQ 侧 `/qq new` 失败：0.2.1 的「服务在线时拒绝终端 /qq new」误伤了后台服务进程自己，
-  命令被吞掉后 6 秒超时，QQ 收到「开新会话失败」。现在用 `QQBOT_SERVICE_PID` 区分服务进程。
+  命令被吞掉后 6 秒超时，QQ 收到「开新会话失败」。现在用 `PIQQCONNECT_SERVICE_PID` 区分服务进程。
 
 ## 0.2.1 — 2026-10-23
 

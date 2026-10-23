@@ -88,7 +88,7 @@ export function createFakeCtx() {
 
 let tempDir;
 export function tempConfigPath() {
-	if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qqbot-test-"));
+	if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-test-"));
 	return path.join(tempDir, `config-${Math.random().toString(36).slice(2)}.json`);
 }
 

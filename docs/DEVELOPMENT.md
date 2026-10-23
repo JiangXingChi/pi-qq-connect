@@ -9,8 +9,8 @@
 ## 本地加载
 
 ```bash
-git clone https://github.com/<you>/pi-qqbot.git
-cd pi-qqbot
+git clone https://github.com/<you>/pi-qq-connect.git
+cd pi-qq-connect
 
 # 方式一：临时加载，不写设置
 pi --extension .
@@ -22,7 +22,7 @@ pi install .
 ./scripts/install.sh
 ```
 
-启动后终端输入 `/qq status`；配置在 `~/.pi/agent/pi-qqbot.json`（权限 600）。
+启动后终端输入 `/qq status`；配置在 `~/.pi/agent/pi-qq-connect.json`（权限 600）。
 
 ## 测试
 
@@ -41,7 +41,7 @@ npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop
 ```
 index.js              Pi 入口（package.json 的 pi.extensions 指向它）
 src/                  运行模块：网关、API、桥、配置、日志、媒体、服务、锁
-bin/pi-qqbot.mjs      常驻启动器（pi --mode rpc）
+bin/pi-qq-connect.mjs      常驻启动器（pi --mode rpc）
 examples/config.json  配置样例
 scripts/install.sh    软链安装；uninstall.sh 只删软链
 packaging/            systemd 单元示例
@@ -66,6 +66,6 @@ npm publish               # prepublishOnly 会先跑 npm test
 
 ## 约定
 
-- 测试不连真 QQ，凭据只在 `~/.pi/agent/pi-qqbot.json`。
+- 测试不连真 QQ，凭据只在 `~/.pi/agent/pi-qq-connect.json`。
 - 改网关/发送/会话切换要补对应测试；提交前 `npm test` 必须全过。
-- 文件名、包名、配置/锁/服务状态统一用 `pi-qqbot`。
+- 文件名、包名、配置/锁/服务状态统一用 `pi-qq-connect`。

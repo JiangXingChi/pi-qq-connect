@@ -16,16 +16,16 @@ jobs:
       - name: Check npm tarball contents
         run: |
           set -euo pipefail
-          node --check bin/pi-qqbot.mjs
+          node --check bin/pi-qq-connect.mjs
           npm pack --dry-run --json > /tmp/pack.json
           node --input-type=module - <<'EOF'
           import fs from "node:fs";
           const pack = Object.values(JSON.parse(fs.readFileSync("/tmp/pack.json", "utf8")))[0];
           const paths = new Set(pack.files.map((f) => f.path));
-          const required = ["package.json", "index.js", "src/index.js", "bin/pi-qqbot.mjs", "README.md", "docs/PLAN.md", "packaging/pi-qqbot.service"];
+          const required = ["package.json", "index.js", "src/index.js", "bin/pi-qq-connect.mjs", "README.md", "docs/PLAN.md", "packaging/pi-qq-connect.service"];
           const missing = required.filter((f) => !paths.has(f));
           if (missing.length) throw new Error(`tarball 缺少：${missing.join(", ")}`);
-          const bad = [...paths].filter((f) => /(^|\/)test\//.test(f) || /\.log$/.test(f) || /pi-qqbot\.json$/.test(f) || /\.git/.test(f));
+          const bad = [...paths].filter((f) => /(^|\/)test\//.test(f) || /\.log$/.test(f) || /pi-qq-connect\.json$/.test(f) || /\.git/.test(f));
           if (bad.length) throw new Error(`tarball 含不该发布的文件：${bad.join(", ")}`);
           console.log(`tarball OK：${paths.size} 个文件`);
           EOF

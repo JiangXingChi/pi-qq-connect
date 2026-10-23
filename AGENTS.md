@@ -1,4 +1,4 @@
-# AGENTS.md — pi-qqbot 开发说明
+# AGENTS.md — pi-qq-connect 开发说明
 
 给在本目录工作的 AI coding agent 看。用户文档是 `README.md`，决策与协议事实是
 `docs/PLAN.md`，架构是 `docs/ARCHITECTURE.md`，发布流程是 `docs/DEVELOPMENT.md`。
@@ -20,10 +20,10 @@
 | `src/session.js` | 桥：串行队列、注入、收集回答、回复预算、`/qq new` 拦截 |
 | `src/text.js` | 事件归一化、引用消息、@ 清理、Markdown 清理、代码围栏分片 |
 | `src/media.js` | `[[file:路径]]` 解析、敏感路径/大小校验、分片上传、`msg_type=7` 发送 |
-| `src/config.js` | `~/.pi/agent/pi-qqbot.json` 读取、归一化、校验、env 覆盖 |
+| `src/config.js` | `~/.pi/agent/pi-qq-connect.json` 读取、归一化、校验、env 覆盖 |
 | `src/service.js` | 后台常驻服务的状态文件、心跳、起停 |
 | `src/lock.js` | 单实例锁（避免两个 pi 抢网关） |
-| `bin/pi-qqbot.mjs` | 常驻启动器：拉起 `pi --mode rpc` 并保活 |
+| `bin/pi-qq-connect.mjs` | 常驻启动器：拉起 `pi --mode rpc` 并保活 |
 | `test/mock-qq.mjs` | 本地假 QQ 平台（HTTP + 最小 WebSocket 服务端） |
 | `test/unit.test.mjs` | 单测 + mock 集成（默认测试入口） |
 | `test/media.test.mjs` | 文件标记、路径校验、分片上传、媒体发送 |
@@ -41,13 +41,13 @@ npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
 npm run e2e:service       # 后台服务进程，不调模型
 npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop，不调模型
 ./scripts/publish-to-core.sh          # 语法 + 单测 + 差异预览（不改文件）
-./scripts/publish-to-core.sh --apply  # 备份正式版后发布到 ~/Agent/Core/系统/智能设定/Pi插件/pi-qqbot
+./scripts/publish-to-core.sh --apply  # 备份正式版后发布到 ~/Agent/Core/系统/智能设定/Pi插件/pi-qq-connect
 ```
 
 手工调试：
 
 ```bash
-pi --extension ~/Agent/Temp/pi-qqbot-dev        # 用开发副本启动，不碰正式版
+pi --extension ~/Agent/Temp/pi-qq-connect-dev        # 用开发副本启动，不碰正式版
 /qq status ; /qq log 50 ; /qq take（锁被活进程占用时）
 ```
 
@@ -55,9 +55,9 @@ pi --extension ~/Agent/Temp/pi-qqbot-dev        # 用开发副本启动，不碰
 
 1. **零运行时依赖**：不要引入 npm 包。HTTP 用 `fetch`，WebSocket 用全局 `WebSocket`，
    加密用 `node:crypto`。依赖会让扩展在 `pi install` 之外无法加载。
-2. **不要改软链指向**：`~/.pi/agent/extensions/pi-qqbot` 永远指向正式目录
-   `~/Agent/Core/系统/智能设定/Pi插件/pi-qqbot`。测试用 `--extension`，发布用 `scripts/publish-to-core.sh`。
-3. **凭据不进仓库**：AppID/AppSecret 只在 `~/.pi/agent/pi-qqbot.json`（0600）。
+2. **不要改软链指向**：`~/.pi/agent/extensions/pi-qq-connect` 永远指向正式目录
+   `~/Agent/Core/系统/智能设定/Pi插件/pi-qq-connect`。测试用 `--extension`，发布用 `scripts/publish-to-core.sh`。
+3. **凭据不进仓库**：AppID/AppSecret 只在 `~/.pi/agent/pi-qq-connect.json`（0600）。
    代码、文档、测试、日志里都不许出现真实值。
 4. **发布只走 `scripts/publish-to-core.sh`**：手工 `cp -r` 会漏掉删除和校验。发布前必须
    `npm test` 全过；改了网关/发送/协议要额外 `npm run e2e`。
@@ -80,7 +80,7 @@ pi --extension ~/Agent/Temp/pi-qqbot-dev        # 用开发副本启动，不碰
 | 改回复发送 | `src/session.js` 的 `#deliver` | 预算/窗口/额度测试 |
 | 改网关行为 | `src/gateway.js` | 关闭码表、重连测试 |
 | 加终端命令 | `src/index.js` 的 `registerCommand` + `HELP` | README 用法表 |
-| 改服务管理 | `src/service.js` + `bin/pi-qqbot.mjs` | 两个 `e2e-service*` 脚本 |
+| 改服务管理 | `src/service.js` + `bin/pi-qq-connect.mjs` | 两个 `e2e-service*` 脚本 |
 
 ## 完成标准
 

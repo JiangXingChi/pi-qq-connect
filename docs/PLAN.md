@@ -1,4 +1,4 @@
-# PLAN：pi-qqbot（QQ 官方机器人 ⇄ 当前 Pi 会话）
+# PLAN：pi-qq-connect（QQ 官方机器人 ⇄ 当前 Pi 会话）
 
 ## 目标
 
@@ -15,8 +15,8 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
   - 引用消息、@ 前缀清理、入站图片（带 QQBot token 下载）、语音取 QQ 转写
   - 代码围栏分片、Markdown 可选、单聊「正在输入」、发送重试/随机 `msg_seq`
   - 单实例锁 + 锁看门狗；对外命令 6 条：`/qq status|start|stop|new|log|take`
-  - `service`：后台常驻 pi（`pi-qqbot-service` 会话）、心跳、防双开、stale pid 防误杀
-  - `bin/pi-qqbot.mjs` 常驻启动器 + systemd 单元示例
+  - `service`：后台常驻 pi（`pi-qq-connect-service` 会话）、心跳、防双开、stale pid 防误杀
+  - `bin/pi-qq-connect.mjs` 常驻启动器 + systemd 单元示例
 - 未做 / 候选（按优先级）：
   1. 服务崩溃自愈：目前靠 `/qq start` 或 systemd，插件不自动重拉
   2. 多会话隔离：所有 QQ 对话共用一条 Pi 上下文（可用 `/qq new` 手动切）
@@ -32,7 +32,7 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 | 项目 | 形态 | 取舍 |
 |---|---|---|
 | pi-agent-qqbot 1.0.4 | 绑定当前会话，仅 C2C 单人 | 最贴近本需求，但仅私聊、依赖 ws/unpdf、0★ |
-| @xsqm/pi-qqbot 0.4.7 | 独立 AgentSession，群+私聊 | 功能全，但上下文与终端会话隔离 |
+| @xsqm/pi-qq-connect 0.4.7 | 独立 AgentSession，群+私聊 | 功能全，但上下文与终端会话隔离 |
 | pi-qq-integration 0.5.3 | 注入当前会话，群+私聊，多实例选主 | 6★，实现可参考 |
 | pi-qq-bridge 0.1.3 | 隔离会话 + /workspace | 声明只支持 <1.0 |
 
@@ -56,14 +56,14 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 3. **窗口兜底**：群 5 分钟 / 单聊 60 分钟；超时后若该会话有更新消息，用最新的 msg_id 回复。
 4. **去重**：msg_id 内存表（TTL 10 分钟）。
 5. **入站图片**：https 附件下载成 base64，作为 Pi 图片输入（上限 2 张 / 8MB），失败降级为文字占位。
-6. **单实例锁**：`~/.pi/agent/pi-qqbot.lock` 存 pid；第二个 Pi 不抢网关，`/qq take` 强制接管。
-7. **形态**：交互式（pi 开着即在）+ `bin/pi-qqbot.mjs` 拉起 `pi --mode rpc` 常驻会话。
+6. **单实例锁**：`~/.pi/agent/pi-qq-connect.lock` 存 pid；第二个 Pi 不抢网关，`/qq take` 强制接管。
+7. **形态**：交互式（pi 开着即在）+ `bin/pi-qq-connect.mjs` 拉起 `pi --mode rpc` 常驻会话。
 
 ## 文件
 
 ```
 index.js  src/{config,log,auth,api,gateway,text,session,lock,index}.js
-bin/pi-qqbot.mjs  index.js  examples/config.json  scripts/install.sh  scripts/uninstall.sh  packaging/pi-qqbot.service
+bin/pi-qq-connect.mjs  index.js  examples/config.json  scripts/install.sh  scripts/uninstall.sh  packaging/pi-qq-connect.service
 test/{ws-server,mock-qq,harness,unit.test,e2e}.mjs
 ```
 
@@ -87,7 +87,7 @@ test/{ws-server,mock-qq,harness,unit.test,e2e}.mjs
 | 入站图片转 Pi image content | ✅ 代码实现（https + 大小/数量上限，失败降级文字） |
 | 单实例锁 + `/qq take` | ✅ 单测 + `/qq status` 显示锁持有者 |
 | 零依赖 | ✅ 仅 node: 内置模块；`npm test` 无安装 |
-| 交互式 + rpc 常驻 | ✅ 真 pi 加载通过；`bin/pi-qqbot.mjs` 保活 |
+| 交互式 + rpc 常驻 | ✅ 真 pi 加载通过；`bin/pi-qq-connect.mjs` 保活 |
 | 端到端 | ✅ 真 pi 回复 `pong`，mock 收到 `{content:"pong",msg_type:0,msg_id:"e2e-msg-1",msg_seq:1}` |
 
 计划外补充：`before_agent_start` 判定「这轮是不是 QQ 发起的」（终端里输入的消息不会被误回给 QQ）、
@@ -158,12 +158,12 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 
 实现：
 
-- `bin/pi-qqbot.mjs` 启动即写 `~/.pi/agent/pi-qqbot.service.json`（pid、会话、cwd），
+- `bin/pi-qq-connect.mjs` 启动即写 `~/.pi/agent/pi-qq-connect.service.json`（pid、会话、cwd），
   每 15 秒更新 `heartbeatAt`，退出时删掉自己的状态文件；给子 pi 注入
-  `QQBOT_SERVICE_PID` 标识身份。
+  `PIQQCONNECT_SERVICE_PID` 标识身份。
 - 插件启动时先读状态：**服务在线且自己不是服务** → 只显示「服务在线」，不连网关、不抢锁。
 - `/qq service status|start|stop|restart`：start 先让出本地网关与锁，再 detached 拉起
-  `bin/pi-qqbot.mjs --session-id pi-qqbot-service`，最多等 8 秒确认心跳；stop 发 SIGTERM 并等退出。
+  `bin/pi-qq-connect.mjs --session-id pi-qq-connect-service`，最多等 8 秒确认心跳；stop 发 SIGTERM 并等退出。
 - 心跳超过 45 秒或 pid 消失即判定掉线。
 
 验证：
@@ -225,7 +225,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 
 ## 开机自启（0.2.4）
 
-- systemd **用户级**单元：`packaging/pi-qqbot.service`，`WantedBy=default.target`；
+- systemd **用户级**单元：`packaging/pi-qq-connect.service`，`WantedBy=default.target`；
 - PATH 显式包含 `%h/.local/bin`（pi）和 `/usr/sbin`（node），不依赖登录 shell；
 - `Restart=on-failure`：正常 `/qq stop`/`systemctl stop` 不会自动拉回，崩溃才重拉；
 - `KillMode=mixed` + `TimeoutStopSec=20`：先让启动器把 SIGTERM 转给 pi，超时才整组杀；
@@ -240,7 +240,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 「服务进程 vs TUI 控制面」单独做一轮：
 
 - 列出三种角色与判定条件，写进 `docs/ARCHITECTURE.md`；
-- 角色判断加 `ppid === 状态文件 pid`，防止 `QQBOT_SERVICE_PID` 被服务里的工具子进程继承后，
+- 角色判断加 `ppid === 状态文件 pid`，防止 `PIQQCONNECT_SERVICE_PID` 被服务里的工具子进程继承后，
   孙进程被误认成服务；
 - 单测覆盖：TUI 控制面拒绝 `/qq new`、服务进程放行、伪造环境变量但 ppid 不对仍拒绝；
 - `/qq start` 在服务已在线时先 `stop()` 本地网关；`/qq take` 只有 `state.gateway` 存在才报成功；
@@ -250,7 +250,7 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 
 0.2.1 给终端 `/qq new` 加了「服务在线就拒绝」的保护，但 QQ 侧的 `/qq new` 也是通过
 `sendUserMessage` dispatch 到同一 handler，并且执行者正是后台服务进程本身，于是被一起拒绝，
-6 秒后回「开新会话失败」。修法：用 `QQBOT_SERVICE_PID` 判断当前进程是不是状态文件里的服务，
+6 秒后回「开新会话失败」。修法：用 `PIQQCONNECT_SERVICE_PID` 判断当前进程是不是状态文件里的服务，
 是服务就放行；TUI 控制面仍然拒绝。单测覆盖两种角色。
 
 ## 第十轮：多轮审改（0.2.1）
@@ -272,19 +272,19 @@ QQ 侧会话命令（`/new` `/resume` 属于 Pi 的命令上下文操作，事�
 
 目标：项目名、目录、包元数据统一为可发布形态；运行逻辑不变。
 
-- 名称：`pi-qqbot`（npm 未占用；配置/锁/服务文件名已经是它）。
-- 目录：开发副本 `~/Agent/Temp/pi-qqbot-dev`；正式版 `~/Agent/Core/系统/智能设定/Pi插件/pi-qqbot`。
+- 名称：`pi-qq-connect`（npm 未占用；配置/锁/服务文件名已经是它）。
+- 目录：开发副本 `~/Agent/Temp/pi-qq-connect-dev`；正式版 `~/Agent/Core/系统/智能设定/Pi插件/pi-qq-connect`。
 - 结构：
   - 根：`index.js`（Pi 入口，软链安装兼容）、`package.json`、`README.md` / `README.en.md`、`LICENSE`、`CHANGELOG.md`、`AGENTS.md`、`.gitignore`
   - `bin/` 启动器；`src/` 运行模块；`test/` 测试
   - `examples/config.json`；`scripts/install.sh`、`scripts/uninstall.sh`、`scripts/publish-to-core.sh`
-  - `packaging/pi-qqbot.service`；`docs/ARCHITECTURE.md`、`docs/DEVELOPMENT.md`、`docs/PLAN.md`
+  - `packaging/pi-qq-connect.service`；`docs/ARCHITECTURE.md`、`docs/DEVELOPMENT.md`、`docs/PLAN.md`
   - `.github/workflows/ci.yml`（Node 22 跑 `npm test`）
 - `package.json`：去掉 `private`；`version 0.2.0`；加 `pi-package` 关键字、`bin`、`files` 白名单、
   `prepublishOnly: npm test`、`engines`；`repository/homepage` 等确认 GitHub 用户名后再补。
 - 迁移：停服务 → `mv` 正式目录 → 重建软链 → 发布 → 重启服务 → 验证 READY；开发副本目录同步改名。
 - 验证：`npm test` 38 项、`npm pack --dry-run` 24 个文件（40.1 kB）、真 pi `/qq help` 正常、
-  后台服务从新路径 READY、软链指向 `Core/系统/智能设定/Pi插件/pi-qqbot`、旧中文目录已不存在、git 已初始化并打 `v0.2.0`。
+  后台服务从新路径 READY、软链指向 `Core/系统/智能设定/Pi插件/pi-qq-connect`、旧中文目录已不存在、git 已初始化并打 `v0.2.0`。
 - 未做：GitHub 远程仓库与 npm 发布（本机 `gh` 未登录、`npm` 未登录），命令写在 README/DEVELOPMENT。
 
 

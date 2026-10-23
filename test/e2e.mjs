@@ -17,7 +17,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const timeoutArg = process.argv.indexOf("--timeout");
 const timeoutMs = timeoutArg > -1 ? Number(process.argv[timeoutArg + 1]) * 1000 : 180_000;
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qqbot-e2e-"));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-e2e-"));
 const configPath = path.join(dir, "config.json");
 const logPath = path.join(dir, "e2e.log");
 const sessionDir = path.join(dir, "sessions");
@@ -44,7 +44,7 @@ fs.writeFileSync(
 const child = spawn("pi", ["--mode", "rpc", "--session-dir", sessionDir, "--no-extensions", "--extension", root], {
 	cwd: dir,
 	stdio: ["pipe", "pipe", "pipe"],
-	env: { ...process.env, QQBOT_CONFIG: configPath },
+	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
 });
 
 let stderr = "";

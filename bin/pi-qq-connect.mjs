@@ -4,10 +4,10 @@
  * QQ 一直在线的同时，这条 pi 会话也持久化在 --session-id 指定的文件里。
  *
  * 用法：
- *   ./bin/pi-qqbot.mjs                    # 默认 session-id=pi-qqbot，cwd=当前目录
- *   ./bin/pi-qqbot.mjs --cwd ~/Agent/Core # 指定 pi 的工作目录
- *   ./bin/pi-qqbot.mjs --session-id qq    # 指定会话文件
- *   ./bin/pi-qqbot.mjs --no-restart       # 退出后不自动重启
+ *   ./bin/pi-qq-connect.mjs                    # 默认 session-id=pi-qq-connect，cwd=当前目录
+ *   ./bin/pi-qq-connect.mjs --cwd ~/Agent/Core # 指定 pi 的工作目录
+ *   ./bin/pi-qq-connect.mjs --session-id qq    # 指定会话文件
+ *   ./bin/pi-qq-connect.mjs --no-restart       # 退出后不自动重启
  */
 
 import { spawn } from "node:child_process";
@@ -36,7 +36,7 @@ function arg(name, fallback) {
 	return value && !value.startsWith("--") ? value : fallback;
 }
 
-const sessionId = arg("session-id", "pi-qqbot");
+const sessionId = arg("session-id", "pi-qq-connect");
 const cwd = arg("cwd", process.cwd());
 const restart = !process.argv.includes("--no-restart");
 const extra = [];
@@ -70,26 +70,26 @@ function scheduleRestart() {
 	if (restart) {
 		setTimeout(launch, restartDelay);
 	} else {
-		console.error("[pi-qqbot] --no-restart：服务结束");
+		console.error("[pi-qq-connect] --no-restart：服务结束");
 		removeServiceState(stateFile);
 		process.exit(0);
 	}
 }
 
 function launch() {
-	// --no-extensions：只加载本插件，避免机器上另一份 pi-qqbot 被自动发现、两个网关互相抢锁
+	// --no-extensions：只加载本插件，避免机器上另一份 pi-qq-connect 被自动发现、两个网关互相抢锁
 	const args = ["--mode", "rpc", "--no-extensions", "--session-id", String(sessionId), "--extension", root, ...extra];
-	console.error(`[pi-qqbot] 启动：pi ${args.join(" ")}（cwd=${cwd}）`);
+	console.error(`[pi-qq-connect] 启动：pi ${args.join(" ")}（cwd=${cwd}）`);
 	startedAt = Date.now();
 	let launched;
 	try {
 		launched = spawn("pi", args, {
 			cwd: String(cwd),
 			stdio: ["pipe", "inherit", "inherit"],
-			env: { ...process.env, QQBOT_SERVICE_PID: String(process.pid) },
+			env: { ...process.env, PIQQCONNECT_SERVICE_PID: String(process.pid) },
 		});
 	} catch (err) {
-		console.error(`[pi-qqbot] 无法启动 pi：${err.message}`);
+		console.error(`[pi-qq-connect] 无法启动 pi：${err.message}`);
 		scheduleRestart();
 		return;
 	}
@@ -100,7 +100,7 @@ function launch() {
 		ended = true;
 		child = undefined;
 		if (stopping) return;
-		console.error(`[pi-qqbot] pi ${why}`);
+		console.error(`[pi-qq-connect] pi ${why}`);
 		scheduleRestart();
 	};
 	launched.once("exit", (code, signal) => onEnd(`退出（code=${code} signal=${signal}）`));
@@ -111,7 +111,7 @@ function launch() {
 
 function shutdown(signal) {
 	stopping = true;
-	console.error(`[pi-qqbot] 收到 ${signal}，停止`);
+	console.error(`[pi-qq-connect] 收到 ${signal}，停止`);
 	try {
 		child?.stdin?.end();
 		child?.kill("SIGTERM");
@@ -128,7 +128,7 @@ function shutdown(signal) {
 	waiter.unref?.();
 	setTimeout(() => {
 		if (child) {
-			console.error("[pi-qqbot] 子进程 8 秒内未退出，强制结束，避免留下占网关的孤儿");
+			console.error("[pi-qq-connect] 子进程 8 秒内未退出，强制结束，避免留下占网关的孤儿");
 			try {
 				child.kill("SIGKILL");
 			} catch {
@@ -146,7 +146,7 @@ process.on("exit", () => removeServiceState(stateFile));
 // 已经有一个健康的服务时，第二个实例直接退出，避免两个 pi 抢网关/覆盖心跳
 const existing = readServiceState(stateFile);
 if (existing && existing.pid !== process.pid && isServiceAlive(existing)) {
-	console.error(`[pi-qqbot] 已有后台服务在运行（pid ${existing.pid}），本进程退出`);
+	console.error(`[pi-qq-connect] 已有后台服务在运行（pid ${existing.pid}），本进程退出`);
 	// systemd 下让它可见地失败（配合 StartLimitBurst=3），否则 unit 看起来是 inactive；
 	// 手动 /qq start 的场景则干净退出，避免父进程误判。
 	process.exit(process.env.INVOCATION_ID ? 1 : 0);
