@@ -4,7 +4,15 @@
   "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻",
   "type": "module",
   "license": "MIT",
-  "author": "pi-qq-connect contributors",
+  "author": "JiangXingChi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
+  },
+  "homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
+  "bugs": {
+    "url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
+  },
   "engines": {
     "node": ">=22.19.0"
   },

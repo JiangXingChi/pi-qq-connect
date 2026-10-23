@@ -9,7 +9,7 @@
 ## 本地加载
 
 ```bash
-git clone https://github.com/<you>/pi-qq-connect.git
+git clone https://github.com/JiangXingChi/pi-qq-connect.git
 cd pi-qq-connect
 
 # 方式一：临时加载，不写设置

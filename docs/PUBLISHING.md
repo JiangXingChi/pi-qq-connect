@@ -7,21 +7,21 @@
 - GitHub 账号，且本机已登录：`gh auth login`
 - npm 账号，且本机已登录：`npm login`
 - Node.js ≥ 22.19
-- 仓库地址确定后，把下面两处占位符替换成真实地址：
-  - `README.md`、`README.en.md` 里的 `https://github.com/<you>/pi-qq-connect.git`
+- 仓库地址确定后，仓库地址已确定为 `https://github.com/JiangXingChi/pi-qq-connect`；如果仓库迁移，替换下面两处：
+  - `README.md`、`README.en.md` 里的克隆地址
   - `package.json` 增加 `repository`、`homepage`、`bugs`
 
-`package.json` 建议字段（把 `<owner>` 换成 GitHub 用户名）：
+`package.json` 建议字段：
 
 ```json
 {
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/<owner>/pi-qq-connect.git"
+    "url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
   },
-  "homepage": "https://github.com/<owner>/pi-qq-connect#readme",
+  "homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
   "bugs": {
-    "url": "https://github.com/<owner>/pi-qq-connect/issues"
+    "url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
   }
 }
 ```
@@ -65,7 +65,7 @@ git push origin main --tags
 如果还没有远端仓库：
 
 ```bash
-gh repo create <owner>/pi-qq-connect --public --source=. --remote=origin --push
+gh repo create JiangXingChi/pi-qq-connect --public --source=. --remote=origin --push
 ```
 
 ## 4. npm 发布

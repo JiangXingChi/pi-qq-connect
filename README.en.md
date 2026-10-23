@@ -23,7 +23,7 @@ pi install npm:pi-qq-connect
 Or from a checkout:
 
 ```bash
-git clone https://github.com/<you>/pi-qq-connect.git
+git clone https://github.com/JiangXingChi/pi-qq-connect.git
 cd pi-qq-connect
 pi install .
 ```

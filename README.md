@@ -38,7 +38,7 @@ pi install npm:pi-qq-connect
 从源码作为包安装：
 
 ```bash
-git clone https://github.com/<you>/pi-qq-connect.git
+git clone https://github.com/JiangXingChi/pi-qq-connect.git
 cd pi-qq-connect
 pi install .
 ```
