@@ -13,6 +13,8 @@ Bridge the **official QQ bot platform** to the **current Pi session**. Zero runt
 - Long replies are split on code fences; failures retry with a fresh `msg_seq`.
 - Outbound images/files: end a reply with `[[file:/absolute/path]]` (max 3).
 - Dedup, serial queue, passive-reply budget, single-instance lock, detached service mode.
+- On session switches the gateway stays up; a stale handle stops the bridge with a single notice
+  instead of silently dropping messages, and a missing bridge is rebuilt automatically.
 
 ## Install
 

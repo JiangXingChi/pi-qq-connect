@@ -51,6 +51,17 @@ QQ 里发 `/qq new`：桥拦截，不注入模型，改用
 `ExtensionCommandContext` 调 `ctx.newSession()`。`session_shutdown(reason="new")` /
 `session_start(reason="new")` 时插件不重建网关、不释放锁；桥清空旧队列并回执。
 
+Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再用会抛
+`This extension ctx is stale after session replacement or reload...`。插件对这个错误的处理是：
+
+- `switchSession()` 传 `withSession`，在回调里刷新 `state.ctx`；
+- 桥注入时命中 stale → 记一条 error、给 QQ 回一次「`/qq stop` 再 `/qq start`」、停桥并交上层收尾，
+  **不**再走「每 2 秒无限重试」那条路（0.2.9 之前会无限重试，日志能刷到几百 KB 且消息全丢）；
+- `session_start(new|resume|fork)` 时若已没有活动桥 → 直接 `start(ctx)` 重建，网关和锁保持。
+
+后台服务的启动参数必须是**稳定路径**（例如 `pi install` 后的包目录）。若 `--extension` 指向的目录
+已经不存在，Pi 会静默跳过该扩展，新会话里根本没有插件实例——这种情况只能靠别用临时目录来避免。
+
 ## 进程角色
 
 同一份代码会在三种角色里运行，判断错了就会出现「服务在跑但 CLI 也连网关」或「QQ 里
@@ -91,6 +102,6 @@ QQ 里发 `/qq new`：桥拦截，不注入模型，改用
 
 ## 测试
 
-- `npm test`：45 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传。
+- `npm test`：64 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话切换回归。
 - `npm run e2e`：真 `pi --mode rpc` + mock QQ，调一次模型。
 - `npm run e2e:service` / `e2e:service-cmd`：后台服务生命周期与 `/qq start|stop`。

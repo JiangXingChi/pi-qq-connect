@@ -14,6 +14,7 @@
 - 单聊「正在输入」；长回复按代码围栏切块；失败换新 `msg_seq` 重试
 - 出站图片/文件：回复末尾 `[[file:/绝对路径]]`，分片上传后以图片/文件卡片发出
 - 入站去重、串行队列、被动回复预算、窗口兜底、单实例锁、后台常驻服务
+- 会话切换后旧句柄失效时只提示一次并停桥（不再静默丢消息），`/qq new` 后自动重建
 - `/new`、`/resume`、`/qq new` 都不会把网关断掉重连
 
 ## 前置：注册 QQ 机器人
@@ -190,12 +191,13 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 | 网关一直「重连中」 | `/qq log 50`：4004 凭据错、4008 限流、4013/4014 intents 没开、4914/4915 沙箱/封禁 |
 | QQ 里没反应 | 群聊必须 @；确认 `allowUsers`/`allowGroups` 里有你的 openid |
 | 回复「消息发送超频」 | 触发回复上限或窗口过期，等用户再发一条 |
+| `/qq new` 后 QQ 消息没反应 | 0.2.9 以前旧句柄失效会静默丢弃消息；现在只提示一次并停桥。仍无反应就 `/qq stop` 再 `/qq start` |
 | 文件发送失败 | 日志里有 `err_code` 和 `trace_id`；常见 40093006 是合并参数、850031 是超大小 |
 
 ## 开发
 
 ```bash
-npm test                  # 45 项单测 + mock QQ
+npm test                  # 64 项单测 + mock QQ
 npm run e2e               # 真 pi --mode rpc + mock QQ（会调一次模型）
 npm run e2e:service       # 后台服务进程生命周期
 npm run e2e:service-cmd   # 真 pi 里 /qq start|stop

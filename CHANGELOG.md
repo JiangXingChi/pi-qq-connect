@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.9 — 2026-10-24
+
+修「换会话后 QQ 桥静默失效」：`/qq new` 成功，但旧扩展实例拿旧句柄继续注入，失败后每 2 秒无限重试，
+QQ 消息全丢、日志被刷到几百 KB。
+
+根因：Pi 1.4 起换会话/重载会让旧 `pi`、旧 `ctx` 立即作废（`stale after session replacement`）；
+原逻辑把这条永久性错误当成「Pi 正忙」，一直在重试。
+
+- 桥注入命中 stale 时：只记一条 error、给 QQ 回一次「`/qq stop` 再 `/qq start`」、停桥并交上层收尾，
+  不再安排重试；其它错误（如 Pi 正忙）保持原「放回队首 + 歇 2 秒」行为。
+- `session_start(new|resume|fork)` 时若已没有活动桥，直接重建网关（自愈）。
+- `switchSession()` 按 Pi 文档传 `withSession`，在回调里刷新 `ctx`，不再用已作废的命令上下文。
+- `requestNewSession()` 命中 stale 时同样停桥并给出明确提示，避免留一条吞消息的网关。
+- 新增 `test/stale-session.test.mjs`：19 项断言覆盖上述三处与「非 stale 仍重试」的防回归，
+  `npm test` 共 64 项。
+- 文档：说明后台服务的 `--extension` 必须用稳定路径（目录不存在时 Pi 会静默跳过扩展），
+  并在架构文档补一节会话切换的失效处理。
+
 ## 0.2.8 — 2026-10-23
 
 - `/qq new` 的切换等待从 6 秒放宽到 15 秒，长任务收尾时不再过早回「开新会话失败」。
