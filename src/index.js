@@ -24,7 +24,7 @@ import { Logger } from "./log.js";
 import { QqAuth } from "./auth.js";
 import { QqApi } from "./api.js";
 import { QqGateway } from "./gateway.js";
-import { QqBridge } from "./session.js";
+import { QqBridge, isStaleContextError } from "./session.js";
 import { acquireLock, readLock, releaseLock } from "./lock.js";
 import { maskId, normalizeEvent } from "./text.js";
 
@@ -147,9 +147,18 @@ export default function createExtension(pi) {
 				setup: async (sessionManager) => {
 					if (label) sessionManager.appendSessionInfo(label);
 				},
+				// 换会话后旧 ctx 立即作废：用 pi 提供的替换后上下文刷新提示/状态栏目标
+				withSession: (next) => {
+					state.ctx = next;
+				},
 			});
 			if (result?.cancelled) notify("开新会话被取消", "warning");
 		} catch (err) {
+			if (isStaleContextError(err)) {
+				// 旧句柄已失效：新会话其实已经开成，出问题的是桥
+				notify("开新会话失败：当前 pi 会话句柄已作废，请在终端 /qq stop 再 /qq start 重启后台服务", "warning");
+				return;
+			}
 			notify(`开新会话失败：${err?.message ?? err}`, "warning");
 		}
 	}
@@ -160,6 +169,12 @@ export default function createExtension(pi) {
 		try {
 			state.extensionApi.sendUserMessage(text, { expandPromptTemplates: true });
 		} catch (err) {
+			if (isStaleContextError(err)) {
+				// 旧扩展实例的 pi 已失效：桥也不能再注入，直接收掉，别留一条吞消息的网关
+				state.bridge?.notifyNewSessionFailed("会话已切换，插件句柄已失效，请 /qq stop 再 /qq start 重启服务");
+				stop();
+				return;
+			}
 			state.bridge?.notifyNewSessionFailed(err?.message ?? String(err));
 			return;
 		}
@@ -259,6 +274,11 @@ export default function createExtension(pi) {
 				notify,
 				isOnline: () => state.gateway?.state === "connected",
 				onNewSession: (args) => requestNewSession(args),
+				onFatal: () => {
+					// 桥自己判定无法继续（通常是会话替换后句柄失效）：连网关一起收掉，避免静默吞消息
+					stop();
+					setStatus(STATE_LABEL.error, "会话切换后失效，需重启");
+				},
 			});
 			const gateway = new QqGateway({
 				auth,
@@ -494,6 +514,12 @@ export default function createExtension(pi) {
 			if (state.newSessionTimer) {
 				clearTimeout(state.newSessionTimer);
 				state.newSessionTimer = undefined;
+			}
+			if (!state.bridge) {
+				// 没有活动桥（上一个实例的自己停了 / 被回收）：直接重建，别留一条没人管的网关
+				notify(`会话已切换（${event.reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
+				void start(ctx);
+				return;
 			}
 			if (event.reason === "new") {
 				void state.bridge?.onSessionSwitched();

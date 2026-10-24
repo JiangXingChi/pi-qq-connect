@@ -12,6 +12,14 @@ import { randomInt } from "node:crypto";
 import { parseFileMarkers, uploadFile } from "./media.js";
 import { buildPrompt, chatKey, chunkText, isAllowed, maskId, replyTarget, stripMarkdown } from "./text.js";
 
+/**
+ * Pi 换会话/重载后会作废旧 pi、旧 ctx 句柄；pi 1.x 的固定文案如下。
+ * 命中的意思不是"暂时忙"，而是这个句柄永久不可用。
+ */
+export function isStaleContextError(err) {
+	return /stale after session replacement or reload/i.test(String(err?.message ?? err ?? ""));
+}
+
 function logChat(item) {
 	return `${item.kind}:${maskId(item.chatId)}`;
 }
@@ -58,7 +66,7 @@ async function downloadImage(url, maxBytes, headers = {}) {
 }
 
 export class QqBridge {
-	constructor({ pi, api, config, log, notify, isOnline, onNewSession, injectTimeoutMs = 5000 }) {
+	constructor({ pi, api, config, log, notify, isOnline, onNewSession, onFatal, injectTimeoutMs = 5000 }) {
 		this.pi = pi;
 		this.api = api;
 		this.cfg = config;
@@ -73,6 +81,8 @@ export class QqBridge {
 		this.pumping = false;
 		this.injecting = false;
 		this.injectTimeoutMs = injectTimeoutMs;
+		this.onFatal = onFatal;
+		this.staleReported = false;
 		this.stopped = false;
 		this.seen = new Map();
 		this.lastByChat = new Map();
@@ -403,12 +413,47 @@ export class QqBridge {
 			this.#armAck(inflight);
 			this.#startTyping(inflight);
 		} catch (err) {
-			// 可能刚好在流式输出中：放回队首，等 agent_settled 或定时器再试
 			this.inflight = undefined;
+			if (isStaleContextError(err)) {
+				// 会话已被替换：旧 pi 句柄永久失效，重试多少次都不会成功
+				this.#failOnStale(item, err);
+				return;
+			}
+			// 可能刚好在流式输出中：放回队首，等 agent_settled 或定时器再试
 			this.queue.unshift(item);
 			this.injecting = true;
 			this.log.warn(`注入失败，等空闲后重试：${err?.message ?? err}`);
 			this.#scheduleRetry();
+		}
+	}
+
+	/**
+	 * 会话被替换后旧 pi 句柄永久失效：一次性告警、回执 QQ、停桥并交上层收尾。
+	 * 绝不能再走 #scheduleRetry：那条路径每 2 秒重试一次且没有上限。
+	 */
+	#failOnStale(item, err) {
+		if (this.staleReported) return;
+		this.staleReported = true;
+		const reason = err?.message ?? String(err);
+		this.log.error(`会话已被替换，QQ 桥失效，停止桥接：${reason}`);
+		try {
+			const sending = this.api?.sendText?.(
+				replyTarget(item),
+				"⚠️ Pi 会话已切换，这个 QQ 桥已失效。请在终端执行 /qq stop 再 /qq start 恢复。",
+				{ msgId: item.msgId, msgSeq: this.#nextSeq({ seqs: new Set(), attemptsLeft: 1 }) },
+			);
+			if (sending && typeof sending.catch === "function") {
+				sending.catch((sendErr) => this.log.warn(`失效提示发送失败：${sendErr?.message ?? sendErr}`));
+			}
+		} catch {
+			// 网关可能已经不可用，回执失败不影响停桥
+		}
+		this.notify("QQ 桥已随会话切换失效，已停止重试：请在终端 /qq stop 再 /qq start", "warning");
+		this.stop();
+		try {
+			this.onFatal?.(err);
+		} catch {
+			// 上层收尾失败不影响已经停掉的桥
 		}
 	}
 
