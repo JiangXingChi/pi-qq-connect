@@ -64,7 +64,7 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录�
 ```
 index.js  src/{config,log,auth,api,gateway,text,session,lock,index}.js
 bin/pi-qq-connect.mjs  index.js  examples/config.json  scripts/install.sh  scripts/uninstall.sh  packaging/pi-qq-connect.service
-test/{ws-server,mock-qq,harness,unit.test,e2e}.mjs
+test/{ws-server,mock-qq,harness,unit.test,bridge.test,commands.test,media.test,launcher.test,stale-session.test,session-adopt.test,e2e,e2e-service,e2e-service-cmd}.mjs
 ```
 
 ## 验证
@@ -73,6 +73,15 @@ test/{ws-server,mock-qq,harness,unit.test,e2e}.mjs
 2. 集成：假 pi API + mock QQ（HTTP+WS）走完「收到 QQ → 注入 → assistant 文本 → 发回」，断言 msg_id/msg_seq。
 3. 端到端：真 `pi --mode rpc` 加载本扩展，mock 网关发「请只回复：pong」，断言 mock 收到含 pong 的被动回复。
 4. 真 Pi 里 `/qq status` 可用、`/qq` 命令注册成功。
+5. 会话接棒（0.4.1）：QQ 发 `/new` 后 10 秒内回执、新会话里继续对话、`/qq status` 仍可用、
+   日志无 `stale after session replacement` 与「换会话 30 秒内没有完成」。
+
+## 决策记录
+
+- 0.2.9：stale 时停桥 + `onFatal`，避免每 2 秒无限重试。
+- 0.4.1：**推翻上一条**。pi 1.4 换会话时旧实例句柄作废、新实例重跑工厂，
+  停桥只会把整条 QQ 通道判死。改为：事件/命令按实例注册、新实例 `adopt()` 接棒、
+  stale 只暂停（保留网关与队列，每周期提示一次）、`endSwitch` 保留排队消息并重新解析暂存命令。
 
 ## 实现核对（2026-10-22）
 
