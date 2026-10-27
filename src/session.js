@@ -152,9 +152,9 @@ export class QqBridge {
 	/** 换会话/重建时清掉进行中的状态；排队消息由调用方（endSwitch）另行放回。 */
 	reset() {
 		this.generation++;
+		// 令牌只增不减：正在跑的 #restore 会因为令牌不匹配而放弃放开泵
 		this.restoreToken = (this.restoreToken ?? 0) + 1;
 		this.restoring = false;
-		this.restoreToken = 0;
 		this.retryCount = 0;
 		this.#clearTimers();
 		this.#stopTyping(this.inflight);
@@ -298,7 +298,6 @@ export class QqBridge {
 				// 期间可能又发生了一次 #restore/reset：只有最后一次才有资格放开泵
 				if (token === this.restoreToken) {
 					this.restoring = false;
-		this.restoreToken = 0;
 					void this.pump();
 				}
 			}
