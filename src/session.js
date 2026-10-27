@@ -23,8 +23,13 @@ export function isStaleContextError(err) {
 	return /stale after session replacement or reload/i.test(String(err?.message ?? err ?? ""));
 }
 
+/** 注入失败后的重试延迟：2s → 4s → 8s … 上限 30s。 */
+export function retryDelayFor(count) {
+	return Math.min(2000 * 2 ** Math.max(0, count - 1), 30_000);
+}
+
 /** QQ 多媒体 URL 带 appid/fileid/rkey，日志里只留主机名。 */
-function maskUrl(url) {
+export function maskUrl(url) {
 	try {
 		return new URL(url).origin;
 	} catch {
@@ -114,6 +119,7 @@ export class QqBridge {
 		this.finishing = false;
 		this.pumping = false;
 		this.injecting = false;
+		this.restoring = false;
 		this.injectTimeoutMs = injectTimeoutMs;
 		this.stale = false;
 		this.retryCount = 0;
@@ -133,6 +139,8 @@ export class QqBridge {
 	get status() {
 		return {
 			queue: this.queue.length,
+			deferred: this.deferred.length,
+			switching: this.switching,
 			busy: this.running,
 			stale: this.stale,
 			inflight: this.inflight ? { chat: chatKey(this.inflight.item), texts: this.inflight.texts.length } : null,
@@ -208,6 +216,8 @@ export class QqBridge {
 		this.reset();
 		if (inflight) {
 			this.log.warn(`会话切换时有一条消息正在生成回答，该回答随旧会话丢弃（chat=${maskId(inflight.item.chatId)}）`);
+			// 别让用户对着空气等：明确告诉他这条要重发
+			void this.reply(inflight.item, "⚠️ 会话已切换，刚才这条请求被中断了，请重发一次。");
 		}
 		this.#restore([...kept, ...deferred], "会话切换完成");
 	}
@@ -250,21 +260,33 @@ export class QqBridge {
 			void this.pump();
 			return;
 		}
-		// 命令按顺序补跑完再泵消息：否则 /model、/compact 可能落到刚注入的提问之后
+		// 命令按顺序补跑完再泵消息：否则 /model、/compact 可能落到刚注入的提问之后。
+		// restoring 期间挡住了其它 pump() 触发点（enqueue、agent_settled 等）。
 		this.log.info(`${label}，补跑 ${commands.length} 条命令`);
+		this.restoring = true;
 		void (async () => {
-			for (let i = 0; i < commands.length; i++) {
-				if (this.stopped) return;
-				if (this.stale) {
-					// 接棒还没完成：把剩下的命令原样放回队首，等下一次恢复，别静默丢掉
-					const rest = commands.slice(i).map((entry) => entry.item);
-					this.queue.unshift(...rest);
-					this.log.warn(`桥已暂停，${rest.length} 条命令留到接棒后再跑`);
-					return;
+			try {
+				for (let i = 0; i < commands.length; i++) {
+					if (this.stopped) {
+						const rest = commands.slice(i).map((entry) => entry.item);
+						this.log.warn(`桥已停止，${rest.length} 条命令不再补跑`);
+						return;
+					}
+					if (this.stale) {
+						// 接棒还没完成：命令留在 deferred，等 adopt() 之后重新恢复，绝不塞进 queue（会被当提问喂模型）
+						const rest = commands.slice(i).map((entry) => entry.item);
+						this.deferred.unshift(...rest);
+						this.log.warn(`桥已暂停，${rest.length} 条命令留到接棒后再跑`);
+						return;
+					}
+					await this.#runCommand(commands[i].item, commands[i].command);
 				}
-				await this.#runCommand(commands[i].item, commands[i].command);
+			} catch (err) {
+				this.log.error(`补跑命令异常：${err?.stack ?? err}`);
+			} finally {
+				this.restoring = false;
+				void this.pump();
 			}
-			void this.pump();
 		})();
 	}
 
@@ -499,7 +521,19 @@ export class QqBridge {
 	}
 
 	async pump() {
-		if (this.stopped || this.stale || this.switching || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
+		if (
+			this.stopped ||
+			this.stale ||
+			this.switching ||
+			this.restoring ||
+			this.pumping ||
+			this.finishing ||
+			this.injecting ||
+			this.inflight ||
+			this.running ||
+			this.queue.length === 0
+		)
+			return;
 		this.pumping = true;
 		try {
 			await this.#pumpOnce();
@@ -518,6 +552,15 @@ export class QqBridge {
 	async #pumpOnce() {
 		const generation = this.generation;
 		const item = this.queue.shift();
+		// 兜底：命令无论从哪条路径进了队列，都不能当普通提问喂给模型
+		if (!item.expandTemplates) {
+			const command = parseCommand(item.text);
+			if (command) {
+				this.log.info(`队列里发现命令 /${command.name}，改走命令通道`);
+				await this.#runCommand(item, command);
+				return;
+			}
+		}
 		// 转发的斜杠命令必须保持「/开头且无信封头」，否则 Pi 不会展开技能/模板
 		const prompt = item.expandTemplates
 			? { text: String(item.text ?? ""), imageUrls: [] }
@@ -625,7 +668,7 @@ export class QqBridge {
 		if (this.retryTimer || this.stopped) return;
 		// 退避：2s → 4s → 8s … 最多 30s。否则一条永久失败的消息会每 2 秒刷一次日志并堵住队列
 		this.retryCount = (this.retryCount ?? 0) + 1;
-		const delay = Math.min(2000 * 2 ** (this.retryCount - 1), 30_000);
+		const delay = retryDelayFor(this.retryCount);
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = undefined;
 			this.injecting = false;

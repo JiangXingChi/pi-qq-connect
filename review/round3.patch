@@ -1,0 +1,3417 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index ab0c993..72a536c 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -37,7 +37,7 @@
+ ## 命令
+ 
+ ```bash
+-npm test                  # node --test test/：93 项，单测 + mock 平台集成，十来秒
++npm test                  # node --test test/：131 项，单测 + mock 平台集成，十来秒
+ npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
+ npm run e2e:service       # 后台服务进程，不调模型
+ npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop，不调模型
+@@ -100,8 +100,8 @@ systemctl --user restart pi-qq-connect.service          # ExecStart 指向本目
+ 
+ ## 完成标准
+ 
+-- `npm test` 全过（当前 64 项），无挂起、无未捕获 rejection。
+-- 触及协议/网关/发送/会话切换时：`npm run e2e` 通过（pong → `/qq new` → 新会话继续对话）。
++- `npm test` 全过（当前 131 项），无挂起、无未捕获 rejection。
++- 触及协议/网关/发送/会话切换时：`npm run e2e` 通过（pong → `/new` → 新会话继续对话）。
+ - 触及服务模式时：`npm run e2e:service` 与 `e2e:service-cmd` 通过。
+ - `./scripts/publish-to-core.sh` 预览里的差异与本次改动一致，没有意外删除。
+ - `npm pack --dry-run` 的文件清单只包含运行必需文件（无凭据、无日志、无 `.git`）。
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 51acd43..6bd565f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,31 @@
+ # Changelog
+ 
++## 0.4.1 — 2026-10-27
++
++修「发一次 `/new`，QQ 桥就废掉」。
++
++pi 1.4 换会话的时序（实测）：旧实例先收到 `session_shutdown` 且 `pi` 句柄**立即永久作废**，
++新实例的扩展工厂随后重跑、收到 `session_start`，旧实例的 `withSession` 才执行。
++0.4.0 用 `state.registered` 让新实例直接 return，于是新实例什么都没注册：
++
++- `session_start` 没人接 → `endSwitch()` 不执行 → 30 秒看门狗超时，暂存消息延后才放回；
++- `/qq`、`/new` 等命令在新会话里全部消失；
++- 随后拿旧句柄注入，报 `stale after session replacement`，桥自我判死，只能重启示服务。
++
++改动：
++
++- 事件与命令改成**按 pi 实例注册**（`WeakSet` 去重），同一实例重复加载仍只注册一次；
++  换会话后新实例照常注册命令与事件。
++- 新增 `bridge.adopt(pi)`：新实例接棒时换掉死句柄。
++- `session_shutdown` 的 `new`/`resume`/`fork`/`reload` 改为 `beginSwitch()`：暂停注入、
++  暂存消息，网关与锁保留；`session_start` 接棒后 `endSwitch()` 收尾。
++- stale 不再自毁：只标记暂停、把消息留在队列、每个切换周期最多提示一次，等新实例接棒后自动恢复。
++- 修审阅发现：`beginSwitch` 重复调用不再清空暂存；`endSwitch` 保住排队消息并重新解析暂存命令
++  （斜杠命令不会被当提问喂模型）；`pump` 在切换中不注入；stale 时保留切换状态；
++  注入失败重试改为 2s→30s 退避；`/qq status` 显示暂停状态；AppID 打码；`start()` 重入不再丢 `session_start`。
++- 测试：新增 `test/session-adopt.test.mjs`（实例接棒、reload/fork、重复 beginSwitch、队列保留、暂存命令）；
++  e2e 改用真实的 `/new`，并断言换会话后 `/qq status` 仍可用、日志里没有 stale。
++
+ ## 0.4.0 — 2026-10-27
+ 
+ 目标从「QQ 里能用」提到「QQ 里和终端一样」。
+diff --git a/README.en.md b/README.en.md
+index 17f199c..ed04c78 100644
+--- a/README.en.md
++++ b/README.en.md
+@@ -13,8 +13,9 @@ Bridge the **official QQ bot platform** to the **current Pi session**. Zero runt
+ - Long replies are split on code fences; failures retry with a fresh `msg_seq`.
+ - Outbound images/files: end a reply with `[[file:/absolute/path]]` (max 3).
+ - Dedup, serial queue, passive-reply budget, single-instance lock, detached service mode.
+-- On session switches the gateway stays up; a stale handle stops the bridge with a single notice
+-  instead of silently dropping messages, and a missing bridge is rebuilt automatically.
++- On session switches the gateway stays up; the next session instance adopts the bridge and keeps
++  queued commands and messages. A stale handle pauses injection instead of stopping the bridge,
++  so a missing bridge is rebuilt and the queue resumes automatically.
+ 
+ ## Install
+ 
+diff --git a/README.md b/README.md
+index 3f5d934..423ee41 100644
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,7 @@
+ - 单聊「正在输入」；长回复按代码围栏切块；失败换新 `msg_seq` 重试
+ - 出站图片/文件：回复末尾 `[[file:/绝对路径]]`，分片上传后以图片/文件卡片发出
+ - 入站去重、串行队列、被动回复预算、窗口兜底、单实例锁、后台常驻服务
+-- 会话切换后旧句柄失效时只提示一次并停桥（不再静默丢消息），`/new` 后自动重建
++- 会话切换后旧 pi 句柄作废：新会话实例自动接棒，命令与队列都保留（不再停桥、不再 30 秒超时）
+ - `/new`、`/resume` 都不会把网关断掉重连
+ - QQ 里可用桌面命令：`/new` `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help`
+ 
+@@ -245,7 +245,7 @@ QQ 每条被动回复最多 5 次、单段 4000 字量级。回答超过分片
+ | 网关一直「重连中」 | `/qq log 50`：4004 凭据错、4008 限流、4013/4014 intents 没开、4914/4915 沙箱/封禁 |
+ | QQ 里没反应 | 群聊必须 @；确认 `allowUsers`/`allowGroups` 里有你的 openid |
+ | 回复「消息发送超频」 | 触发回复上限或窗口过期，等用户再发一条 |
+-| `/new` 后 QQ 消息没反应 | 0.2.9 以前旧句柄失效会静默丢弃消息；现在只提示一次并停桥。仍无反应就 `/qq stop` 再 `/qq start` |
++| `/new` 后 QQ 消息没反应 | 0.4.1 起新会话实例会自动接棒；用 `/qq status` 看队列是否显示「已暂停，等新会话接棒」，必要时 `/qq stop` 再 `/qq start` |
+ | 某个插件在 QQ 里不生效 | `pi-qq-connect --dry-run` 看启动参数；确认 `extensions` 不是 `none`，且该包在 `pi config` 里是启用的 |
+ | 文件发送失败 | 日志里有 `err_code` 和 `trace_id`；常见 40093006 是合并参数、850031 是超大小 |
+ 
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 022ac11..94ce75b 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -63,9 +63,12 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
+ 执行完 `ctx.newSession()` 直接把真实结果 resolve 回去（0.3.0 及以前是轮询 15 秒，常报假失败）。
+ `/qq new` 保留为别名，行为相同；`/qq new` 在 QQ 里只会回一条「已并入 `/new`」。
+ 
+-换会话期间（`bridge.beginSwitch()`）到达的消息进 `deferred` 暂存；`session_start(reason="new")`
+-触发 `endSwitch()` 放回队列。若 30 秒内没等到 `session_start`（被拒绝、报错、超时），定时器或
+-`requestNewSession()` 的失败分支会 `cancelSwitch()`，绝不让消息卡在暂存区。
++换会话期间（`bridge.beginSwitch()`，可重复调用，只续看门狗、不清暂存）到达的消息进 `deferred`；
++新会话实例的 `session_start` 触发 `endSwitch()`：保住原来排队的消息、丢掉旧会话的在途回答、
++把暂存的条目**重新解析**（斜杠命令重新走命令通道，绝不喂模型）后放回队列。
++若 30 秒内没等到 `session_start`（被拒绝、报错、超时），定时器或 `requestNewSession()` 的失败分支
++会 `cancelSwitch()`，绝不让消息卡在暂存区；`requestNewSession()` 的超时（60 秒）比看门狗长，
++且切换仍在进行时不会擅自 `cancelSwitch()`。
+ 
+ ## 资源加载（0.4.0）
+ 
+@@ -74,16 +77,23 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
+ 技能、模板、主题、`AGENTS.md`）。QQ 会话因此与终端会话加载同一套资源。
+ 
+ `extensions: "none"` 退回隔离模式（`--no-extensions` + 只挂自身）；数组是白名单，
+-`builtin:tool-search` 这类条目原样透传。自动发现与显式 `--extension` 同时命中时，
+-入口的 `Symbol.for` 幂等守卫保证只注册一次。
++`builtin:tool-search` 这类条目原样透传。自动发现与显式 `--extension` 同时命中时：
++同一个 `pi` 对象只注册一次（`WeakSet`）；若 pi 给的是两个不同对象（实测会这样），
++再按 `session_start` 的同一个 `ctx` 选举负责人，只让一个实例处理事件与接棒。
+ 
+ Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再用会抛
+-`This extension ctx is stale after session replacement or reload...`。插件对这个错误的处理是：
++`This extension ctx is stale after session replacement or reload...`。实测时序：
++旧实例先收到 `session_shutdown`（句柄当场作废）→ 扩展工厂重跑出新实例 → 新实例收到 `session_start`
++→ 旧实例的 `withSession` 才执行。插件的处理是：
+ 
++- 事件与命令**按 pi 实例注册**（不再用「只注册一次」的布尔量）；状态走 `globalThis` 单例；
+ - `switchSession()` 传 `withSession`，在回调里刷新 `state.ctx`；
+-- 桥注入时命中 stale → 记一条 error、给 QQ 回一次「`/qq stop` 再 `/qq start`」、停桥并交上层收尾，
+-  **不**再走「每 2 秒无限重试」那条路（0.2.9 之前会无限重试，日志能刷到几百 KB 且消息全丢）；
+-- `session_start(new|resume|fork)` 时若已没有活动桥 → 直接 `start(ctx)` 重建，网关和锁保持。
++- `session_shutdown` 的换会话/重载类 reason → `bridge.beginSwitch()`（暂停注入、暂存消息，网关和锁保留）；
++  只有 `quit`/`exit`/`shutdown` 才收摊，未知 reason 按换会话处理并记一条 warn；
++- 新实例的 `session_start` → `bridge.adopt(pi)` 换掉死句柄 + `endSwitch()` 收尾；
++- 万一仍命中 stale（例如新实例没加载出来）→ 记一条 error、给 QQ 回一次提示、**暂停但不自毁**：
++  队列与网关保留，等下一次 `adopt()` 自动恢复；每个切换周期只提示一次；
++- `session_start` 时若已没有活动桥 → 直接 `start(ctx)` 重建，网关和锁保持。
+ 
+ 后台服务的启动参数必须是**稳定路径**（例如 `pi install` 后的包目录）。若 `--extension` 指向的目录
+ 已经不存在，Pi 会静默跳过该扩展，新会话里根本没有插件实例——这种情况只能靠别用临时目录来避免。
+@@ -128,6 +138,6 @@ Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再
+ 
+ ## 测试
+ 
+-- `npm test`：64 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话切换回归。
+-- `npm run e2e`：真 `pi --mode rpc` + mock QQ，调一次模型。
++- `npm test`：131 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话接棒/切换回归。
++- `npm run e2e`：真 `pi --mode rpc` + mock QQ，调两次模型；断言 `/new` 后 10 秒内回执、命令仍可用、日志无 stale。
+ - `npm run e2e:service` / `e2e:service-cmd`：后台服务生命周期与 `/qq start|stop`。
+diff --git a/docs/DEVELOPMENT.md b/docs/DEVELOPMENT.md
+index 1981c87..543a952 100644
+--- a/docs/DEVELOPMENT.md
++++ b/docs/DEVELOPMENT.md
+@@ -27,7 +27,7 @@ pi install .
+ ## 测试
+ 
+ ```bash
+-npm test                  # 93 项：配置、文本、分片、预算、额度、去重、锁、服务、媒体上传、
++npm test                  # 131 项：配置、文本、分片、预算、额度、去重、锁、服务、媒体上传、
+                           #      会话切换回归、QQ 侧桌面命令、启动参数（auto/none/数组）、长回答落盘
+ npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
+ npm run e2e:service       # 后台服务进程生命周期，不调模型
+@@ -54,9 +54,9 @@ test/                 单测、mock 平台、端到端
+ 
+ ```bash
+ node bin/pi-qq-connect.mjs --dry-run   # 确认启动参数与预期一致
+-npm test                               # 93 项全过
++npm test                               # 131 项全过
+ npm pack --dry-run                     # 检查 files 白名单：不应出现凭据、日志、.git、test/
+-git tag v0.4.0 && git push --tags      # 先推仓库，再发 npm
++git tag v0.4.1 && git push --tags      # 先推仓库，再发 npm
+ npm publish                            # prepublishOnly 会再跑一次 npm test
+ ```
+ 
+diff --git a/docs/PLAN.md b/docs/PLAN.md
+index 8df6ab5..a7d6ac3 100644
+--- a/docs/PLAN.md
++++ b/docs/PLAN.md
+@@ -64,7 +64,7 @@ QQ 里就是这一个会话，有连续上下文。零外部依赖、单目录
+ ```
+ index.js  src/{config,log,auth,api,gateway,text,session,lock,index}.js
+ bin/pi-qq-connect.mjs  index.js  examples/config.json  scripts/install.sh  scripts/uninstall.sh  packaging/pi-qq-connect.service
+-test/{ws-server,mock-qq,harness,unit.test,e2e}.mjs
++test/{ws-server,mock-qq,harness,unit.test,bridge.test,commands.test,media.test,launcher.test,stale-session.test,session-adopt.test,e2e,e2e-service,e2e-service-cmd}.mjs
+ ```
+ 
+ ## 验证
+@@ -73,6 +73,15 @@ test/{ws-server,mock-qq,harness,unit.test,e2e}.mjs
+ 2. 集成：假 pi API + mock QQ（HTTP+WS）走完「收到 QQ → 注入 → assistant 文本 → 发回」，断言 msg_id/msg_seq。
+ 3. 端到端：真 `pi --mode rpc` 加载本扩展，mock 网关发「请只回复：pong」，断言 mock 收到含 pong 的被动回复。
+ 4. 真 Pi 里 `/qq status` 可用、`/qq` 命令注册成功。
++5. 会话接棒（0.4.1）：QQ 发 `/new` 后 10 秒内回执、新会话里继续对话、`/qq status` 仍可用、
++   日志无 `stale after session replacement` 与「换会话 30 秒内没有完成」。
++
++## 决策记录
++
++- 0.2.9：stale 时停桥 + `onFatal`，避免每 2 秒无限重试。
++- 0.4.1：**推翻上一条**。pi 1.4 换会话时旧实例句柄作废、新实例重跑工厂，
++  停桥只会把整条 QQ 通道判死。改为：事件/命令按实例注册、新实例 `adopt()` 接棒、
++  stale 只暂停（保留网关与队列，每周期提示一次）、`endSwitch` 保留排队消息并重新解析暂存命令。
+ 
+ ## 实现核对（2026-10-22）
+ 
+diff --git a/package.json b/package.json
+index 18c76e7..d1ef2ce 100644
+--- a/package.json
++++ b/package.json
+@@ -1,60 +1,60 @@
+ {
+-  "name": "pi-qq-connect",
+-  "version": "0.4.0",
+-  "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
+-  "type": "module",
+-  "license": "MIT",
+-  "author": "JiangXingChi",
+-  "repository": {
+-    "type": "git",
+-    "url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
+-  },
+-  "homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
+-  "bugs": {
+-    "url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
+-  },
+-  "engines": {
+-    "node": ">=22.19.0"
+-  },
+-  "keywords": [
+-    "pi-package",
+-    "pi",
+-    "pi-extension",
+-    "qq",
+-    "qqbot",
+-    "chatbot",
+-    "bridge"
+-  ],
+-  "bin": "bin/pi-qq-connect.mjs",
+-  "pi": {
+-    "extensions": [
+-      "./index.js"
+-    ]
+-  },
+-  "files": [
+-    "index.js",
+-    "src",
+-    "bin",
+-    "examples",
+-    "packaging",
+-    "scripts/install.sh",
+-    "scripts/uninstall.sh",
+-    "docs/ARCHITECTURE.md",
+-    "docs/DEVELOPMENT.md",
+-    "docs/PLAN.md",
+-    "README.md",
+-    "README.en.md",
+-    "LICENSE",
+-    "CHANGELOG.md"
+-  ],
+-  "scripts": {
+-    "test": "node --test test/",
+-    "e2e": "node test/e2e.mjs",
+-    "e2e:service": "node test/e2e-service.mjs",
+-    "e2e:service-cmd": "node test/e2e-service-cmd.mjs",
+-    "prepublishOnly": "npm test"
+-  },
+-  "publishConfig": {
+-    "access": "public"
+-  }
++	"name": "pi-qq-connect",
++	"version": "0.4.1",
++	"description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
++	"type": "module",
++	"license": "MIT",
++	"author": "JiangXingChi",
++	"repository": {
++		"type": "git",
++		"url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
++	},
++	"homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
++	"bugs": {
++		"url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
++	},
++	"engines": {
++		"node": ">=22.19.0"
++	},
++	"keywords": [
++		"pi-package",
++		"pi",
++		"pi-extension",
++		"qq",
++		"qqbot",
++		"chatbot",
++		"bridge"
++	],
++	"bin": "bin/pi-qq-connect.mjs",
++	"pi": {
++		"extensions": [
++			"./index.js"
++		]
++	},
++	"files": [
++		"index.js",
++		"src",
++		"bin",
++		"examples",
++		"packaging",
++		"scripts/install.sh",
++		"scripts/uninstall.sh",
++		"docs/ARCHITECTURE.md",
++		"docs/DEVELOPMENT.md",
++		"docs/PLAN.md",
++		"README.md",
++		"README.en.md",
++		"LICENSE",
++		"CHANGELOG.md"
++	],
++	"scripts": {
++		"test": "node --test test/",
++		"e2e": "node test/e2e.mjs",
++		"e2e:service": "node test/e2e-service.mjs",
++		"e2e:service-cmd": "node test/e2e-service-cmd.mjs",
++		"prepublishOnly": "npm test"
++	},
++	"publishConfig": {
++		"access": "public"
++	}
+ }
+diff --git a/review/README.md b/review/README.md
+new file mode 100644
+index 0000000..7e73953
+--- /dev/null
++++ b/review/README.md
+@@ -0,0 +1,44 @@
++# 第 1 轮审改说明（给审阅子代理）
++
++仓库：`/home/teacat/Agent/Core/应用/pi-qq-connect`（pi 扩展：把 QQ 官方机器人接到 Pi 会话）
++本次改动：0.4.0 → 0.4.1，修「QQ 里发一次 `/new`，桥就废掉」。
++完整背景与设计见同目录 `PLAN.md`；补丁见 `review/round1.patch`（`git diff` 同内容）。
++
++## 已实测的 pi 1.4 语义（不要当成 bug 来报）
++
++用探针扩展在 `pi --mode rpc` 下实测：
++
++1. `/new` 在实例 I1 的命令 ctx 里执行 → I1 收到 `session_shutdown(new)`，**I1 的 `pi` 句柄立刻永久作废**
++   （任何 `pi.xxx()` 都抛 `stale after session replacement or reload`）。
++2. 模块被缓存但**扩展工厂会重跑**，得到实例 I2（新的 `pi` 对象，`globalThis` 单例仍在）。
++3. I2 收到 `session_start(new)`。
++4. I1 的 `withSession(next)` 在这之后才执行，`ctx.newSession()` 才 resolve。
++5. 旧实例之后不再收到任何 `session_start`；`/reload` 也会：`session_shutdown(reload)` → 工厂重跑（真正重新 import）→ `session_start(reload)`。
++6. `pi.sendUserMessage("/cmd", { expandPromptTemplates: true })` 会**当作命令执行**（不加该选项则当普通提示词喂模型）。
++
++## 本次修复要点
++
++- `src/index.js`：`state.registered` 布尔量 → `WeakSet<pi>` 按实例注册；`session_shutdown` 的
++  `new/resume/fork/reload` 调 `bridge.beginSwitch()`；`session_start` 调 `bridge.adopt(pi)` 并按 reason 收尾。
++- `src/session.js`：新增 `adopt(pi)`；`#failOnStale()` 从「停桥 + onFatal」改为「标记 stale + 暂停 + 保留队列/网关」，
++  接棒后恢复；`pump()` 增加 stale 短路。
++- `test/`：新增 `session-adopt.test.mjs`；改写 `stale-session.test.mjs` 的 P1/P2；`e2e.mjs` 改用真实 `/new`
++  并断言换会话后 `/qq status` 仍可用、日志无 stale。
++
++## 请按指定角度只做只读审阅（不要改文件）
++
++输出格式（简洁）：
++
++```
++## 发现
++1. [阻断/严重/一般/建议] 文件:行 — 问题一句话
++   为什么：…
++   建议：…
++## 未发现问题
++（一句话）
++```
++
++要求：
++- 只报真实缺陷或明确的改进点，不要复述改动、不要给「整体不错」之类空话。
++- 每条必须能指到 `文件:行`，并说明触发条件（尤其是并发/时序）。
++- 你所在的轮次如果没找到任何**阻断/严重**问题，也要把「一般/建议」列全。
+diff --git a/review/round1.patch b/review/round1.patch
+new file mode 100644
+index 0000000..9052621
+--- /dev/null
++++ b/review/round1.patch
+@@ -0,0 +1,596 @@
++diff --git a/CHANGELOG.md b/CHANGELOG.md
++index 51acd43..42daebf 100644
++--- a/CHANGELOG.md
+++++ b/CHANGELOG.md
++@@ -1,5 +1,28 @@
++ # Changelog
++ 
+++## 0.4.1 — 2026-10-27
+++
+++修「发一次 `/new`，QQ 桥就废掉」。
+++
+++pi 1.4 换会话的时序（实测）：旧实例先收到 `session_shutdown` 且 `pi` 句柄**立即永久作废**，
+++新实例的扩展工厂随后重跑、收到 `session_start`，旧实例的 `withSession` 才执行。
+++0.4.0 用 `state.registered` 让新实例直接 return，于是新实例什么都没注册：
+++
+++- `session_start` 没人接 → `endSwitch()` 不执行 → 30 秒看门狗超时，暂存消息延后才放回；
+++- `/qq`、`/new` 等命令在新会话里全部消失；
+++- 随后拿旧句柄注入，报 `stale after session replacement`，桥自我判死，只能重启示服务。
+++
+++改动：
+++
+++- 事件与命令改成**按 pi 实例注册**（`WeakSet` 去重），同一实例重复加载仍只注册一次；
+++  换会话后新实例照常注册命令与事件。
+++- 新增 `bridge.adopt(pi)`：新实例接棒时换掉死句柄。
+++- `session_shutdown` 的 `new`/`resume`/`fork`/`reload` 改为 `beginSwitch()`：暂停注入、
+++  暂存消息，网关与锁保留；`session_start` 接棒后 `endSwitch()` 收尾。
+++- stale 不再自毁：只标记暂停、把消息留在队列、5 分钟最多回一次提示，等新实例接棒后自动恢复。
+++- 测试：新增 `test/session-adopt.test.mjs`（实例接棒、reload、quit）；
+++  e2e 改用真实的 `/new`，并断言换会话后 `/qq status` 仍可用、日志里没有 stale。
+++
++ ## 0.4.0 — 2026-10-27
++ 
++ 目标从「QQ 里能用」提到「QQ 里和终端一样」。
++diff --git a/README.md b/README.md
++index 3f5d934..99b2332 100644
++--- a/README.md
+++++ b/README.md
++@@ -14,7 +14,7 @@
++ - 单聊「正在输入」；长回复按代码围栏切块；失败换新 `msg_seq` 重试
++ - 出站图片/文件：回复末尾 `[[file:/绝对路径]]`，分片上传后以图片/文件卡片发出
++ - 入站去重、串行队列、被动回复预算、窗口兜底、单实例锁、后台常驻服务
++-- 会话切换后旧句柄失效时只提示一次并停桥（不再静默丢消息），`/new` 后自动重建
+++- 会话切换后旧 pi 句柄作废：新会话实例自动接棒，命令与队列都保留（不再停桥、不再 30 秒超时）
++ - `/new`、`/resume` 都不会把网关断掉重连
++ - QQ 里可用桌面命令：`/new` `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help`
++ 
++@@ -245,7 +245,7 @@ QQ 每条被动回复最多 5 次、单段 4000 字量级。回答超过分片
++ | 网关一直「重连中」 | `/qq log 50`：4004 凭据错、4008 限流、4013/4014 intents 没开、4914/4915 沙箱/封禁 |
++ | QQ 里没反应 | 群聊必须 @；确认 `allowUsers`/`allowGroups` 里有你的 openid |
++ | 回复「消息发送超频」 | 触发回复上限或窗口过期，等用户再发一条 |
++-| `/new` 后 QQ 消息没反应 | 0.2.9 以前旧句柄失效会静默丢弃消息；现在只提示一次并停桥。仍无反应就 `/qq stop` 再 `/qq start` |
+++| `/new` 后 QQ 消息没反应 | 0.4.1 起新会话实例会自动接棒；仍无反应就看日志里有没有「新会话实例已接管」，必要时 `/qq stop` 再 `/qq start` |
++ | 某个插件在 QQ 里不生效 | `pi-qq-connect --dry-run` 看启动参数；确认 `extensions` 不是 `none`，且该包在 `pi config` 里是启用的 |
++ | 文件发送失败 | 日志里有 `err_code` 和 `trace_id`；常见 40093006 是合并参数、850031 是超大小 |
++ 
++diff --git a/package.json b/package.json
++index 18c76e7..d1ef2ce 100644
++--- a/package.json
+++++ b/package.json
++@@ -1,60 +1,60 @@
++ {
++-  "name": "pi-qq-connect",
++-  "version": "0.4.0",
++-  "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
++-  "type": "module",
++-  "license": "MIT",
++-  "author": "JiangXingChi",
++-  "repository": {
++-    "type": "git",
++-    "url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
++-  },
++-  "homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
++-  "bugs": {
++-    "url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
++-  },
++-  "engines": {
++-    "node": ">=22.19.0"
++-  },
++-  "keywords": [
++-    "pi-package",
++-    "pi",
++-    "pi-extension",
++-    "qq",
++-    "qqbot",
++-    "chatbot",
++-    "bridge"
++-  ],
++-  "bin": "bin/pi-qq-connect.mjs",
++-  "pi": {
++-    "extensions": [
++-      "./index.js"
++-    ]
++-  },
++-  "files": [
++-    "index.js",
++-    "src",
++-    "bin",
++-    "examples",
++-    "packaging",
++-    "scripts/install.sh",
++-    "scripts/uninstall.sh",
++-    "docs/ARCHITECTURE.md",
++-    "docs/DEVELOPMENT.md",
++-    "docs/PLAN.md",
++-    "README.md",
++-    "README.en.md",
++-    "LICENSE",
++-    "CHANGELOG.md"
++-  ],
++-  "scripts": {
++-    "test": "node --test test/",
++-    "e2e": "node test/e2e.mjs",
++-    "e2e:service": "node test/e2e-service.mjs",
++-    "e2e:service-cmd": "node test/e2e-service-cmd.mjs",
++-    "prepublishOnly": "npm test"
++-  },
++-  "publishConfig": {
++-    "access": "public"
++-  }
+++	"name": "pi-qq-connect",
+++	"version": "0.4.1",
+++	"description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
+++	"type": "module",
+++	"license": "MIT",
+++	"author": "JiangXingChi",
+++	"repository": {
+++		"type": "git",
+++		"url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
+++	},
+++	"homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
+++	"bugs": {
+++		"url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
+++	},
+++	"engines": {
+++		"node": ">=22.19.0"
+++	},
+++	"keywords": [
+++		"pi-package",
+++		"pi",
+++		"pi-extension",
+++		"qq",
+++		"qqbot",
+++		"chatbot",
+++		"bridge"
+++	],
+++	"bin": "bin/pi-qq-connect.mjs",
+++	"pi": {
+++		"extensions": [
+++			"./index.js"
+++		]
+++	},
+++	"files": [
+++		"index.js",
+++		"src",
+++		"bin",
+++		"examples",
+++		"packaging",
+++		"scripts/install.sh",
+++		"scripts/uninstall.sh",
+++		"docs/ARCHITECTURE.md",
+++		"docs/DEVELOPMENT.md",
+++		"docs/PLAN.md",
+++		"README.md",
+++		"README.en.md",
+++		"LICENSE",
+++		"CHANGELOG.md"
+++	],
+++	"scripts": {
+++		"test": "node --test test/",
+++		"e2e": "node test/e2e.mjs",
+++		"e2e:service": "node test/e2e-service.mjs",
+++		"e2e:service-cmd": "node test/e2e-service-cmd.mjs",
+++		"prepublishOnly": "npm test"
+++	},
+++	"publishConfig": {
+++		"access": "public"
+++	}
++ }
++diff --git a/src/index.js b/src/index.js
++index b4c79c5..84e9cc7 100644
++--- a/src/index.js
+++++ b/src/index.js
++@@ -65,7 +65,6 @@ function newRuntime() {
++ 		bridge: undefined,
++ 		error: null,
++ 		starting: false,
++-		registered: false,
++ 		lastInbound: undefined,
++ 		lockWatch: undefined,
++ 		runner: undefined,
++@@ -79,20 +78,26 @@ const shared = root[RUNTIME_KEY] ?? (root[RUNTIME_KEY] = newRuntime());
++ 
++ /** 测试用：彻底清掉进程内状态。 */
++ export function resetRuntimeForTests() {
++-	shared.bridge?.stop();
++-	shared.gateway?.stop();
+++	shared.bridge?.stop?.();
+++	shared.gateway?.stop?.();
++ 	if (shared.lockWatch) clearInterval(shared.lockWatch);
++ 	Object.assign(shared, newRuntime());
+++	delete shared.seenInstances;
++ }
++ 
++ export default function createExtension(pi) {
++ 	const state = shared;
+++	// Pi 每换一次会话（/new、/resume、/fork、/reload）都会用新的 pi 句柄重跑扩展工厂，
+++	// 旧句柄随即永久作废。状态仍用进程级单例，但事件与命令必须按实例注册：
+++	// 否则新实例什么都不注册——/qq 等命令消失、session_start 收不到、
+++	// 桥只能在 30 秒看门狗超时后误判「桥失效」。
++ 	state.extensionApi = pi;
++ 	if (state.bridge) state.bridge.pi = pi;
++-	// 同一进程里被加载两次（例如自动发现 + 显式 --extension）时只注册一次，
+++	// 同一个实例被加载两次（自动发现 + 显式 --extension）时只注册一次，
++ 	// 否则命令与事件监听会重复，一条 QQ 消息会被回复两次。
++-	if (state.registered) return state;
++-	state.registered = true;
+++	const seen = (state.seenInstances ??= new WeakSet());
+++	if (seen.has(pi)) return state;
+++	seen.add(pi);
++ 
++ 	function setStatus(label, detail) {
++ 		const text = detail ? `QQ: ${label} · ${detail}` : `QQ: ${label}`;
++@@ -338,11 +343,6 @@ export default function createExtension(pi) {
++ 				notify,
++ 				isOnline: () => state.gateway?.state === "connected",
++ 				onCommand: (command) => handleCommand(command),
++-				onFatal: () => {
++-					// 桥自己判定无法继续（通常是会话替换后句柄失效）：连网关一起收掉，避免静默吞消息
++-					stop();
++-					setStatus(STATE_LABEL.error, "会话切换后失效，需重启");
++-				},
++ 			});
++ 			const gateway = new QqGateway({
++ 				auth,
++@@ -603,30 +603,38 @@ export default function createExtension(pi) {
++ 	pi.on("session_start", (event, ctx) => {
++ 		state.ctx = ctx;
++ 		state.extensionApi = pi;
++-		if (state.bridge) state.bridge.pi = pi;
++-
++-		// /new /resume /fork 只是换了 Pi 会话：网关、锁保留
++-		if (["new", "resume", "fork"].includes(event?.reason)) {
++-			if (!state.bridge) {
++-				// 没有活动桥（上一个实例的自己停了 / 被回收）：直接重建，别留一条没人管的网关
++-				notify(`会话已切换（${event.reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
++-				void start(ctx);
++-				return;
++-			}
++-			if (event.reason === "new") {
++-				state.bridge?.endSwitch();
++-			} else {
++-				// 手动 resume/fork：丢掉旧队列，重新开始
++-				state.bridge?.reset();
+++		const reason = event?.reason ?? "startup";
+++
+++		if (!state.bridge) {
+++			// 没有活动桥（首次启动，或上一个实例的桥已经停了）：直接重建
+++			if (reason !== "startup") {
+++				notify(`会话已切换（${reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
++ 			}
+++			void start(ctx);
++ 			return;
++ 		}
++-		void start(ctx);
+++
+++		// 新会话实例接棒：换成新句柄，别再用旧实例那个已作废的 pi
+++		state.bridge.adopt(pi);
+++
+++		// 换会话（含 reload）保留网关与锁，只把暂存消息放回来；
+++		// resume/fork 是手动换上下文，旧队列不再保留
+++		if (reason === "new" || reason === "resume" || reason === "fork" || state.bridge.switching) {
+++			state.bridge.endSwitch();
+++		} else {
+++			// 单纯重新加载（reload）：接棒后继续泵队列
+++			void state.bridge.pump();
+++		}
++ 	});
++ 
++ 	pi.on("session_shutdown", (event) => {
++-		// 同一进程换会话时保留网关和锁；只有退出/重载才收摊
++-		if (event?.reason === "new" || event?.reason === "resume" || event?.reason === "fork") return;
+++		const reason = event?.reason;
+++		// 同一进程换会话/重载：网关和锁保留，但旧 pi 句柄马上作废。
+++		// 先暂停注入把消息暂存，等新实例的 session_start 接棒再继续。
+++		if (reason === "new" || reason === "resume" || reason === "fork" || reason === "reload") {
+++			state.bridge?.beginSwitch();
+++			return;
+++		}
++ 		stop();
++ 	});
++ 
++diff --git a/src/session.js b/src/session.js
++index 6f66ab7..010c592 100644
++--- a/src/session.js
+++++ b/src/session.js
++@@ -23,6 +23,9 @@ export function isStaleContextError(err) {
++ 	return /stale after session replacement or reload/i.test(String(err?.message ?? err ?? ""));
++ }
++ 
+++/** 会话切换等待接棒期间，给 QQ 的提示最多每 5 分钟一次，别刷屏。 */
+++const STALE_NOTICE_MS = 5 * 60_000;
+++
++ function logChat(item) {
++ 	return `${item.kind}:${maskId(item.chatId)}`;
++ }
++@@ -91,7 +94,7 @@ export async function writeOverflowFile(body, cfg, log) {
++ }
++ 
++ export class QqBridge {
++-	constructor({ pi, api, config, log, notify, isOnline, onCommand, onFatal, injectTimeoutMs = 5000 }) {
+++	constructor({ pi, api, config, log, notify, isOnline, onCommand, injectTimeoutMs = 5000 }) {
++ 		this.pi = pi;
++ 		this.api = api;
++ 		this.cfg = config;
++@@ -106,7 +109,8 @@ export class QqBridge {
++ 		this.pumping = false;
++ 		this.injecting = false;
++ 		this.injectTimeoutMs = injectTimeoutMs;
++-		this.onFatal = onFatal;
+++		this.stale = false;
+++		this.staleNoticeAt = 0;
++ 		this.staleReported = false;
++ 		this.stopped = false;
++ 		this.seen = new Map();
++@@ -125,6 +129,7 @@ export class QqBridge {
++ 		return {
++ 			queue: this.queue.length,
++ 			busy: this.running,
+++			stale: this.stale,
++ 			inflight: this.inflight ? { chat: chatKey(this.inflight.item), texts: this.inflight.texts.length } : null,
++ 			stats: { ...this.stats },
++ 		};
++@@ -142,6 +147,19 @@ export class QqBridge {
++ 		this.injecting = false;
++ 	}
++ 
+++	/**
+++	 * 新会话实例接棒：pi 每换会话都会重跑扩展工厂、换一个 pi 句柄，旧句柄随即作废。
+++	 * 这里把旧句柄换掉；如果之前因为等不到接手而暂停，顺便恢复队列。
+++	 */
+++	adopt(pi) {
+++		if (pi) this.pi = pi;
+++		if (!this.stale) return;
+++		this.stale = false;
+++		this.staleReported = false;
+++		this.staleNoticeAt = 0;
+++		this.log.info(`新会话实例已接管 QQ 桥，积压 ${this.queue.length} 条消息待处理`);
+++	}
+++
++ 	/** 换会话开始：期间到达的消息先暂存，等 session_start 之后再放回队列。 */
++ 	beginSwitch() {
++ 		this.switching = true;
++@@ -418,7 +436,7 @@ export class QqBridge {
++ 	}
++ 
++ 	async pump() {
++-		if (this.stopped || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
+++		if (this.stopped || this.stale || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
++ 		this.pumping = true;
++ 		try {
++ 			await this.#pumpOnce();
++@@ -502,33 +520,50 @@ export class QqBridge {
++ 	}
++ 
++ 	/**
++-	 * 会话被替换后旧 pi 句柄永久失效：一次性告警、回执 QQ、停桥并交上层收尾。
++-	 * 绝不能再走 #scheduleRetry：那条路径每 2 秒重试一次且没有上限。
+++	 * 会话被替换：旧 pi 句柄永久失效。
+++	 *
+++	 * 不能每 2 秒重试（#scheduleRetry 没上限），也不能把网关一起收掉——
+++	 * 换会话后新实例很快会通过 adopt() 接棒。所以这里只把桥暂停：
+++	 * 保留队列与网关，回一条提示，等新实例接手后自动继续。
++ 	 */
++ 	#failOnStale(item, err) {
++-		if (this.staleReported) return;
++-		this.staleReported = true;
++ 		const reason = err?.message ?? String(err);
++-		this.log.error(`会话已被替换，QQ 桥失效，停止桥接：${reason}`);
+++		const first = !this.stale;
+++		this.stale = true;
+++		if (first) {
+++			this.staleReported = true;
+++			this.log.error(`会话已被替换，暂停注入直到新会话实例接棒：${reason}`);
+++		}
+++		// 丢弃在途状态；这条还没进模型，放回队首等接棒后重发
+++		this.generation++;
+++		this.#clearTimers();
+++		this.#clearSwitchTimer();
+++		this.#stopTyping(item);
+++		this.inflight = undefined;
+++		this.switching = false;
+++		if (this.deferred.length > 0) {
+++			this.queue.unshift(...this.deferred);
+++			this.deferred = [];
+++		}
+++		if (item && !this.stopped) this.queue.unshift(item);
+++
+++		// 同一个 stale 周期里只扰一次：5 分钟内不重复回同一句
+++		const now = Date.now();
+++		if (now - this.staleNoticeAt < STALE_NOTICE_MS) return;
+++		this.staleNoticeAt = now;
++ 		try {
++ 			const sending = this.api?.sendText?.(
++ 				replyTarget(item),
++-				"⚠️ Pi 会话已切换，这个 QQ 桥已失效。请在终端执行 /qq stop 再 /qq start 恢复。",
+++				"⚠️ Pi 会话已切换，QQ 桥正在等新会话接棒；刚才这条会在接棒后自动重试。",
++ 				{ msgId: item.msgId, msgSeq: this.#nextSeq({ seqs: new Set(), attemptsLeft: 1 }) },
++ 			);
++ 			if (sending && typeof sending.catch === "function") {
++-				sending.catch((sendErr) => this.log.warn(`失效提示发送失败：${sendErr?.message ?? sendErr}`));
+++				sending.catch((sendErr) => this.log.warn(`切换提示发送失败：${sendErr?.message ?? sendErr}`));
++ 			}
++ 		} catch {
++-			// 网关可能已经不可用，回执失败不影响停桥
++-		}
++-		this.notify("QQ 桥已随会话切换失效，已停止重试：请在终端 /qq stop 再 /qq start", "warning");
++-		this.stop();
++-		try {
++-			this.onFatal?.(err);
++-		} catch {
++-			// 上层收尾失败不影响已经停掉的桥
+++			// 网关可能已经不可用，回执失败不影响接棒
++ 		}
+++		this.notify("QQ 桥已暂停：Pi 会话被替换，等新会话接手后自动恢复", "warning");
++ 	}
++ 
++ 	#scheduleRetry() {
++diff --git a/test/e2e.mjs b/test/e2e.mjs
++index 791f970..17328c5 100644
++--- a/test/e2e.mjs
+++++ b/test/e2e.mjs
++@@ -100,16 +100,24 @@ try {
++ 	if (!(sent.body.msg_seq >= 1 && sent.body.msg_seq < 65536)) throw new Error(`msg_seq 不在 0..65535：${sent.body.msg_seq}`);
++ 	if (sent.type !== "private") throw new Error(`目标类型不对：${sent.type}`);
++ 
++-	// /qq new：QQ 里发命令，切到新 Pi 会话，网关不断，新会话还能继续聊
+++	// /new：QQ 里发命令，切到新 Pi 会话，网关不断，命令保持可用，新会话还能继续聊
++ 	const identifiesBefore = mock.state.identifies.length;
++-	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-new-1", userOpenId: "e2e-user", content: "/qq new" }), "e2e-new-1");
+++	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-new-1", userOpenId: "e2e-user", content: "/new" }), "e2e-new-1");
++ 	await until(() => mock.state.sends.some((s) => /已开新会话/.test(String(s.body.content ?? ""))), "新会话回执");
++ 	console.log("✔ QQ 收到「已开新会话」回执");
++ 
++ 	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-msg-2", userOpenId: "e2e-user", content: "请只回复：pong2" }), "e2e-msg-2");
++ 	await until(() => mock.state.sends.some((s) => /pong2/i.test(String(s.body.content ?? ""))), "新会话里继续对话");
++ 	console.log("✔ 新会话里继续对话成功");
++-	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/qq new 期间网关被重连了");
+++	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/new 期间网关被重连了");
+++
+++	// 换会话后命令必须仍然可用（扩展实例被重新注册），且不能再报「桥已失效」
+++	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-status-1", userOpenId: "e2e-user", content: "/qq status" }), "e2e-status-1");
+++	await until(() => mock.state.sends.some((s) => /网关：/.test(String(s.body.content ?? ""))), "换会话后 /qq status 仍可用");
+++	console.log("✔ 换会话后 /qq status 仍可用");
+++	const logText = safeLog();
+++	if (/stale after session replacement/i.test(logText)) throw new Error("换会话后出现 stale 报错");
+++	if (/桥已随会话切换失效/.test(logText)) throw new Error("换会话后桥被误判失效");
++ 
++ 	const sessionFiles = fs.readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
++ 	if (sessionFiles.length < 2) throw new Error(`新会话没有落盘，只有 ${sessionFiles.length} 个 session 文件`);
++diff --git a/test/stale-session.test.mjs b/test/stale-session.test.mjs
++index 588eb7e..69b3682 100644
++--- a/test/stale-session.test.mjs
+++++ b/test/stale-session.test.mjs
++@@ -2,7 +2,7 @@
++  * 会话切换回归测试（不连 QQ 网关、不碰真实会话）。
++  *
++  *   P0 isStaleContextError 只认 pi 的 stale 文案
++- *   P1 stale 注入 → 停桥 + 一次性告警 + onFatal，不再每 2 秒无限重试
+++ *   P1 stale 注入 → 暂停注入（不停桥、不无限重试），新实例接手后自动恢复
++  *   P2 session_start(new|resume|fork) 且没有活动桥 → 重建（自愈）
++  *   P3 switchSession 按 pi 文档传 withSession
++  */
++@@ -56,49 +56,69 @@ test("P0 isStaleContextError 识别", async (t) => {
++ 	});
++ });
++ 
++-test("P1 stale 注入不再无限重试", async (t) => {
+++test("P1 stale 注入只暂停，接棒后恢复", async (t) => {
++ 	const logs = [];
++ 	const notes = [];
++-	let fatal = 0;
+++	const sends = [];
+++	let attempts = 0;
+++	const stalePi = {
+++		sendUserMessage() {
+++			attempts++;
+++			throw new Error(STALE);
+++		},
+++	};
++ 	const bridge = new QqBridge({
++-		pi: {
++-			sendUserMessage() {
++-				throw new Error(STALE);
+++		pi: stalePi,
+++		api: {
+++			sendText: async (target, content) => {
+++				sends.push({ target, content });
++ 			},
++ 		},
++-		api: { sendText: () => ({}) },
++ 		config: makeCfg(),
++ 		log: makeLog(logs),
++ 		notify: (message) => notes.push(message),
++ 		isOnline: () => true,
++ 		onNewSession: () => {},
++-		onFatal: (err) => {
++-			fatal++;
++-			assert.equal(isStaleContextError(err), true);
++-		},
++ 		injectTimeoutMs: 0,
++ 	});
++ 	bridge.enqueue(makeItem());
++ 	await sleep(300);
++ 
++-	await t.test("桥已停止", () => assert.equal(bridge.stopped, true));
++-	await t.test("没有残留重试定时器", () => {
+++	await t.test("桥没有自毁（网关仍在）", () => assert.equal(bridge.stopped, false));
+++	await t.test("标记 stale 并停止重试", () => {
+++		assert.equal(bridge.stale, true);
++ 		assert.equal(bridge.retryTimer, undefined);
++ 		assert.equal(bridge.injectTimer, undefined);
+++		assert.equal(attempts, 1, "stale 后不应再重试注入");
++ 	});
++-	await t.test("队列清空、无 inflight", () => {
++-		assert.equal(bridge.queue.length, 0);
+++	await t.test("没处理的消息留在队列里等接棒", () => {
++ 		assert.equal(bridge.inflight, undefined);
+++		assert.equal(bridge.queue.length, 1);
++ 	});
++-	await t.test("onFatal 只调用一次", () => assert.equal(fatal, 1));
++ 	await t.test("stale 只记一次 error，不再打「等空闲后重试」", () => {
++ 		const staleLines = logs.filter((l) => /stale after session replacement/i.test(l.message));
++ 		assert.equal(staleLines.length, 1, `stale 记录 ${staleLines.length} 条`);
++ 		assert.equal(logs.filter((l) => l.message.includes("等空闲后重试")).length, 0);
++ 	});
++-	await t.test("给 QQ 的提示带 /qq stop", () => {
++-		assert.ok(notes.some((n) => n.includes("/qq stop")), "缺少 /qq stop 提示");
+++	await t.test("提示不再要求用户手动 /qq stop", () => {
+++		assert.ok(notes.some((n) => n.includes("自动恢复")), "缺少自动恢复提示");
+++		assert.ok(sends.some((s) => String(s.content).includes("接棒")), "缺少给 QQ 的提示");
++ 	});
+++
+++	await t.test("新实例接手后自动恢复", async () => {
+++		const injected = [];
+++		bridge.adopt({
+++			sendUserMessage(content) {
+++				injected.push(content);
+++			},
+++		});
+++		assert.equal(bridge.stale, false);
+++		void bridge.pump();
+++		await sleep(200);
+++		assert.ok(injected.length >= 1, "接棒后应把积压消息重新注入");
+++		assert.equal(bridge.queue.length, 0);
+++	});
+++	bridge.stop();
++ });
++ 
++ test("P1 非 stale 错误仍保留原有重试行为（防回归）", async (t) => {
++@@ -180,15 +200,19 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
++ 	await t.test("state.ctx 指向新会话上下文", () => assert.equal(state.ctx, firstCtx));
++ 
++ 	let ended = 0;
++-	let reset = 0;
+++	let adopted = 0;
++ 	state.bridge = {
++ 		pi: null,
++-		endSwitch: () => {
++-			ended++;
+++		switching: false,
+++		adopt(pi) {
+++			adopted++;
+++			this.pi = pi;
++ 		},
++-		reset: () => {
++-			reset++;
+++		endSwitch() {
+++			ended++;
+++			this.switching = false;
++ 		},
+++		reset() {},
++ 	};
++ 	const secondCtx = makeCtx();
++ 	const before = notifications.length;
++@@ -202,8 +226,9 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
++ 	await t.test("有桥时刷新 bridge.pi", () => assert.equal(state.bridge.pi, fake.pi));
++ 
++ 	await fake.emit("session_start", { reason: "resume" }, makeCtx());
++-	await t.test("resume 时重置队列", () => {
++-		assert.equal(reset, 1);
+++	await t.test("resume 同样接棒并结束切换", () => {
+++		assert.equal(adopted, 2);
+++		assert.equal(ended, 2);
++ 		assert.equal(state.ctx, nextCtx);
++ 	});
++ 	state.bridge = undefined;
+diff --git a/review/round2.md b/review/round2.md
+new file mode 100644
+index 0000000..878b00e
+--- /dev/null
++++ b/review/round2.md
+@@ -0,0 +1,43 @@
++# 第 2 轮审改说明（给审阅子代理）
++
++仓库：`/home/teacat/Agent/Core/应用/pi-qq-connect`
++上一轮 3 个审阅代理提了 20+ 条发现，已按下面清单改完。请**先核对每条是否真的改对、有没有引入新问题**，
++再按你自己的角度找剩余缺陷。补丁见 `review/round2.patch`（`git diff` 同内容），背景见 `PLAN.md`、
++`review/README.md`（pi 1.4 实测语义，不要当成 bug 报）。
++
++## 上一轮发现 → 本轮处理
++
++| # | 上一轮发现 | 处理 |
++|---|---|---|
++| 1 | `beginSwitch()` 重复调用清空 `deferred`（QQ 侧 /new 会调两次） | `beginSwitch()` 仅在 `!switching` 时初始化，重复调用只续 30s 看门狗 |
++| 2 | `endSwitch()` 的 `reset()` 清掉 `queue`/`inflight`，与「接棒后重试」承诺矛盾 | `endSwitch()` 先取 `queue`/`deferred`/`inflight`，`reset()` 后经 `#restore()` 放回；in-flight 的回答丢弃并记 warn |
++| 3 | `pump()` 切换中仍注入；`#failOnStale()` 提前清 `switching` | `pump()` 守卫加 `switching`；`#failOnStale()` 不再动 `switching`/`deferred`/`switchTimer` |
++| 4 | 暂存的斜杠命令被当普通提问喂模型 | 新增 `#restore()`：重新 `parseCommand()`，命令走 `#runCommand()`，其余入队 |
++| 5 | 20s 请求超时 < 30s 看门狗，且超时会误 `cancelSwitch` | 请求超时改 60s；`done()` 只在 `!bridge.switching` 时 `cancelSwitch()` |
++| 6 | `start()` 重入丢新实例 `session_start`；桥用旧闭包 `pi` | `startPending` 排队重跑；`new QqBridge({ pi: state.extensionApi ?? pi })` |
++| 7 | 未知 shutdown reason 一律 `stop()` | 只有 `quit/exit/shutdown` 收摊；未知 reason 记 warn 并按换会话处理 |
++| 8 | `#pumpOnce` 里 `generation` 死代码吞消息 | 下载后统一 `queue.unshift(item)` 再返回；删掉不可达判断 |
++| 9 | `#stopTyping(item)` 传错对象 | 改为对 `inflight` 停 typing |
++| 10 | `WeakSet<pi>` 依赖对象身份（实测同一会话会拿到两个不同 `pi`） | 保留 WeakSet（同对象去重）+ 新增按 `session_start` 的同一 `ctx` 选举负责人，其它事件有 `state.owner !== pi` 守卫 |
++| 11 | `ARCHITECTURE.md` / `README.en.md` / `README.md` 文档过时 | 已同步；测试项数改为 125 |
++| 12 | `/qq status` 不显示 `stale` | 队列行加「已暂停，等新会话接棒」 |
++| 13 | 5 分钟节流是死代码 | 删除节流与常量，语义改为「每个 stale 周期提示一次」，文档同步 |
++| 14 | `adopt()` 不清 `injecting`，接棒后仍不流动 | `adopt()`/`#failOnStale()` 都清 `injecting` |
++| 15 | 非 stale 注入失败每 2s 无限重试 | 退避 2s→4s→…→30s，成功注入后归零 |
++| 16 | e2e 断言测不出 0.4.0 的 bug | 加时序断言（/new 回执 <10s）、断言日志无「换会话 30 秒内没有完成」、删掉恒真文案检查 |
++| 17 | 测试恒真/固定 sleep/缺 fork | `harness` 加 `commandRegistrations`；新增 T2b/T5/T6/T8/T9/T10/T11/T12；改用 `waitFor` |
++
++## 输出格式
++
++```
++## 核对上一轮
++1. #1 已修对 / 未修好（原因）/ 引入新问题（说明）
++## 新发现
++1. [阻断/严重/一般/建议] 文件:行 — 问题
++   为什么：…
++   建议：…
++## 未发现问题
++（一句话）
++```
++
++只读，不要改文件。可以跑 `npm test`、`node test/e2e.mjs`、`npm run e2e:service`、`npm run e2e:service-cmd`。
+diff --git a/review/round2.patch b/review/round2.patch
+new file mode 100644
+index 0000000..2824b02
+--- /dev/null
++++ b/review/round2.patch
+@@ -0,0 +1,1067 @@
++diff --git a/AGENTS.md b/AGENTS.md
++index ab0c993..b90c07c 100644
++--- a/AGENTS.md
+++++ b/AGENTS.md
++@@ -37,7 +37,7 @@
++ ## 命令
++ 
++ ```bash
++-npm test                  # node --test test/：93 项，单测 + mock 平台集成，十来秒
+++npm test                  # node --test test/：125 项，单测 + mock 平台集成，十来秒
++ npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
++ npm run e2e:service       # 后台服务进程，不调模型
++ npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop，不调模型
++@@ -100,7 +100,7 @@ systemctl --user restart pi-qq-connect.service          # ExecStart 指向本目
++ 
++ ## 完成标准
++ 
++-- `npm test` 全过（当前 64 项），无挂起、无未捕获 rejection。
+++- `npm test` 全过（当前 125 项），无挂起、无未捕获 rejection。
++ - 触及协议/网关/发送/会话切换时：`npm run e2e` 通过（pong → `/qq new` → 新会话继续对话）。
++ - 触及服务模式时：`npm run e2e:service` 与 `e2e:service-cmd` 通过。
++ - `./scripts/publish-to-core.sh` 预览里的差异与本次改动一致，没有意外删除。
++diff --git a/CHANGELOG.md b/CHANGELOG.md
++index 51acd43..6bd565f 100644
++--- a/CHANGELOG.md
+++++ b/CHANGELOG.md
++@@ -1,5 +1,31 @@
++ # Changelog
++ 
+++## 0.4.1 — 2026-10-27
+++
+++修「发一次 `/new`，QQ 桥就废掉」。
+++
+++pi 1.4 换会话的时序（实测）：旧实例先收到 `session_shutdown` 且 `pi` 句柄**立即永久作废**，
+++新实例的扩展工厂随后重跑、收到 `session_start`，旧实例的 `withSession` 才执行。
+++0.4.0 用 `state.registered` 让新实例直接 return，于是新实例什么都没注册：
+++
+++- `session_start` 没人接 → `endSwitch()` 不执行 → 30 秒看门狗超时，暂存消息延后才放回；
+++- `/qq`、`/new` 等命令在新会话里全部消失；
+++- 随后拿旧句柄注入，报 `stale after session replacement`，桥自我判死，只能重启示服务。
+++
+++改动：
+++
+++- 事件与命令改成**按 pi 实例注册**（`WeakSet` 去重），同一实例重复加载仍只注册一次；
+++  换会话后新实例照常注册命令与事件。
+++- 新增 `bridge.adopt(pi)`：新实例接棒时换掉死句柄。
+++- `session_shutdown` 的 `new`/`resume`/`fork`/`reload` 改为 `beginSwitch()`：暂停注入、
+++  暂存消息，网关与锁保留；`session_start` 接棒后 `endSwitch()` 收尾。
+++- stale 不再自毁：只标记暂停、把消息留在队列、每个切换周期最多提示一次，等新实例接棒后自动恢复。
+++- 修审阅发现：`beginSwitch` 重复调用不再清空暂存；`endSwitch` 保住排队消息并重新解析暂存命令
+++  （斜杠命令不会被当提问喂模型）；`pump` 在切换中不注入；stale 时保留切换状态；
+++  注入失败重试改为 2s→30s 退避；`/qq status` 显示暂停状态；AppID 打码；`start()` 重入不再丢 `session_start`。
+++- 测试：新增 `test/session-adopt.test.mjs`（实例接棒、reload/fork、重复 beginSwitch、队列保留、暂存命令）；
+++  e2e 改用真实的 `/new`，并断言换会话后 `/qq status` 仍可用、日志里没有 stale。
+++
++ ## 0.4.0 — 2026-10-27
++ 
++ 目标从「QQ 里能用」提到「QQ 里和终端一样」。
++diff --git a/README.en.md b/README.en.md
++index 17f199c..ed04c78 100644
++--- a/README.en.md
+++++ b/README.en.md
++@@ -13,8 +13,9 @@ Bridge the **official QQ bot platform** to the **current Pi session**. Zero runt
++ - Long replies are split on code fences; failures retry with a fresh `msg_seq`.
++ - Outbound images/files: end a reply with `[[file:/absolute/path]]` (max 3).
++ - Dedup, serial queue, passive-reply budget, single-instance lock, detached service mode.
++-- On session switches the gateway stays up; a stale handle stops the bridge with a single notice
++-  instead of silently dropping messages, and a missing bridge is rebuilt automatically.
+++- On session switches the gateway stays up; the next session instance adopts the bridge and keeps
+++  queued commands and messages. A stale handle pauses injection instead of stopping the bridge,
+++  so a missing bridge is rebuilt and the queue resumes automatically.
++ 
++ ## Install
++ 
++diff --git a/README.md b/README.md
++index 3f5d934..423ee41 100644
++--- a/README.md
+++++ b/README.md
++@@ -14,7 +14,7 @@
++ - 单聊「正在输入」；长回复按代码围栏切块；失败换新 `msg_seq` 重试
++ - 出站图片/文件：回复末尾 `[[file:/绝对路径]]`，分片上传后以图片/文件卡片发出
++ - 入站去重、串行队列、被动回复预算、窗口兜底、单实例锁、后台常驻服务
++-- 会话切换后旧句柄失效时只提示一次并停桥（不再静默丢消息），`/new` 后自动重建
+++- 会话切换后旧 pi 句柄作废：新会话实例自动接棒，命令与队列都保留（不再停桥、不再 30 秒超时）
++ - `/new`、`/resume` 都不会把网关断掉重连
++ - QQ 里可用桌面命令：`/new` `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help`
++ 
++@@ -245,7 +245,7 @@ QQ 每条被动回复最多 5 次、单段 4000 字量级。回答超过分片
++ | 网关一直「重连中」 | `/qq log 50`：4004 凭据错、4008 限流、4013/4014 intents 没开、4914/4915 沙箱/封禁 |
++ | QQ 里没反应 | 群聊必须 @；确认 `allowUsers`/`allowGroups` 里有你的 openid |
++ | 回复「消息发送超频」 | 触发回复上限或窗口过期，等用户再发一条 |
++-| `/new` 后 QQ 消息没反应 | 0.2.9 以前旧句柄失效会静默丢弃消息；现在只提示一次并停桥。仍无反应就 `/qq stop` 再 `/qq start` |
+++| `/new` 后 QQ 消息没反应 | 0.4.1 起新会话实例会自动接棒；用 `/qq status` 看队列是否显示「已暂停，等新会话接棒」，必要时 `/qq stop` 再 `/qq start` |
++ | 某个插件在 QQ 里不生效 | `pi-qq-connect --dry-run` 看启动参数；确认 `extensions` 不是 `none`，且该包在 `pi config` 里是启用的 |
++ | 文件发送失败 | 日志里有 `err_code` 和 `trace_id`；常见 40093006 是合并参数、850031 是超大小 |
++ 
++diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
++index 022ac11..326adfe 100644
++--- a/docs/ARCHITECTURE.md
+++++ b/docs/ARCHITECTURE.md
++@@ -63,9 +63,12 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
++ 执行完 `ctx.newSession()` 直接把真实结果 resolve 回去（0.3.0 及以前是轮询 15 秒，常报假失败）。
++ `/qq new` 保留为别名，行为相同；`/qq new` 在 QQ 里只会回一条「已并入 `/new`」。
++ 
++-换会话期间（`bridge.beginSwitch()`）到达的消息进 `deferred` 暂存；`session_start(reason="new")`
++-触发 `endSwitch()` 放回队列。若 30 秒内没等到 `session_start`（被拒绝、报错、超时），定时器或
++-`requestNewSession()` 的失败分支会 `cancelSwitch()`，绝不让消息卡在暂存区。
+++换会话期间（`bridge.beginSwitch()`，可重复调用，只续看门狗、不清暂存）到达的消息进 `deferred`；
+++新会话实例的 `session_start` 触发 `endSwitch()`：保住原来排队的消息、丢掉旧会话的在途回答、
+++把暂存的条目**重新解析**（斜杠命令重新走命令通道，绝不喂模型）后放回队列。
+++若 30 秒内没等到 `session_start`（被拒绝、报错、超时），定时器或 `requestNewSession()` 的失败分支
+++会 `cancelSwitch()`，绝不让消息卡在暂存区；`requestNewSession()` 的超时（60 秒）比看门狗长，
+++且切换仍在进行时不会擅自 `cancelSwitch()`。
++ 
++ ## 资源加载（0.4.0）
++ 
++@@ -74,16 +77,23 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
++ 技能、模板、主题、`AGENTS.md`）。QQ 会话因此与终端会话加载同一套资源。
++ 
++ `extensions: "none"` 退回隔离模式（`--no-extensions` + 只挂自身）；数组是白名单，
++-`builtin:tool-search` 这类条目原样透传。自动发现与显式 `--extension` 同时命中时，
++-入口的 `Symbol.for` 幂等守卫保证只注册一次。
+++`builtin:tool-search` 这类条目原样透传。自动发现与显式 `--extension` 同时命中时：
+++同一个 `pi` 对象只注册一次（`WeakSet`）；若 pi 给的是两个不同对象（实测会这样），
+++再按 `session_start` 的同一个 `ctx` 选举负责人，只让一个实例处理事件与接棒。
++ 
++ Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再用会抛
++-`This extension ctx is stale after session replacement or reload...`。插件对这个错误的处理是：
+++`This extension ctx is stale after session replacement or reload...`。实测时序：
+++旧实例先收到 `session_shutdown`（句柄当场作废）→ 扩展工厂重跑出新实例 → 新实例收到 `session_start`
+++→ 旧实例的 `withSession` 才执行。插件的处理是：
++ 
+++- 事件与命令**按 pi 实例注册**（不再用「只注册一次」的布尔量）；状态走 `globalThis` 单例；
++ - `switchSession()` 传 `withSession`，在回调里刷新 `state.ctx`；
++-- 桥注入时命中 stale → 记一条 error、给 QQ 回一次「`/qq stop` 再 `/qq start`」、停桥并交上层收尾，
++-  **不**再走「每 2 秒无限重试」那条路（0.2.9 之前会无限重试，日志能刷到几百 KB 且消息全丢）；
++-- `session_start(new|resume|fork)` 时若已没有活动桥 → 直接 `start(ctx)` 重建，网关和锁保持。
+++- `session_shutdown` 的换会话/重载类 reason → `bridge.beginSwitch()`（暂停注入、暂存消息，网关和锁保留）；
+++  只有 `quit`/`exit`/`shutdown` 才收摊，未知 reason 按换会话处理并记一条 warn；
+++- 新实例的 `session_start` → `bridge.adopt(pi)` 换掉死句柄 + `endSwitch()` 收尾；
+++- 万一仍命中 stale（例如新实例没加载出来）→ 记一条 error、给 QQ 回一次提示、**暂停但不自毁**：
+++  队列与网关保留，等下一次 `adopt()` 自动恢复；每个切换周期只提示一次；
+++- `session_start` 时若已没有活动桥 → 直接 `start(ctx)` 重建，网关和锁保持。
++ 
++ 后台服务的启动参数必须是**稳定路径**（例如 `pi install` 后的包目录）。若 `--extension` 指向的目录
++ 已经不存在，Pi 会静默跳过该扩展，新会话里根本没有插件实例——这种情况只能靠别用临时目录来避免。
++@@ -128,6 +138,6 @@ Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再
++ 
++ ## 测试
++ 
++-- `npm test`：64 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话切换回归。
++-- `npm run e2e`：真 `pi --mode rpc` + mock QQ，调一次模型。
+++- `npm test`：125 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话接棒/切换回归。
+++- `npm run e2e`：真 `pi --mode rpc` + mock QQ，调两次模型；断言 `/new` 后 10 秒内回执、命令仍可用、日志无 stale。
++ - `npm run e2e:service` / `e2e:service-cmd`：后台服务生命周期与 `/qq start|stop`。
++diff --git a/package.json b/package.json
++index 18c76e7..d1ef2ce 100644
++--- a/package.json
+++++ b/package.json
++@@ -1,60 +1,60 @@
++ {
++-  "name": "pi-qq-connect",
++-  "version": "0.4.0",
++-  "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
++-  "type": "module",
++-  "license": "MIT",
++-  "author": "JiangXingChi",
++-  "repository": {
++-    "type": "git",
++-    "url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
++-  },
++-  "homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
++-  "bugs": {
++-    "url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
++-  },
++-  "engines": {
++-    "node": ">=22.19.0"
++-  },
++-  "keywords": [
++-    "pi-package",
++-    "pi",
++-    "pi-extension",
++-    "qq",
++-    "qqbot",
++-    "chatbot",
++-    "bridge"
++-  ],
++-  "bin": "bin/pi-qq-connect.mjs",
++-  "pi": {
++-    "extensions": [
++-      "./index.js"
++-    ]
++-  },
++-  "files": [
++-    "index.js",
++-    "src",
++-    "bin",
++-    "examples",
++-    "packaging",
++-    "scripts/install.sh",
++-    "scripts/uninstall.sh",
++-    "docs/ARCHITECTURE.md",
++-    "docs/DEVELOPMENT.md",
++-    "docs/PLAN.md",
++-    "README.md",
++-    "README.en.md",
++-    "LICENSE",
++-    "CHANGELOG.md"
++-  ],
++-  "scripts": {
++-    "test": "node --test test/",
++-    "e2e": "node test/e2e.mjs",
++-    "e2e:service": "node test/e2e-service.mjs",
++-    "e2e:service-cmd": "node test/e2e-service-cmd.mjs",
++-    "prepublishOnly": "npm test"
++-  },
++-  "publishConfig": {
++-    "access": "public"
++-  }
+++	"name": "pi-qq-connect",
+++	"version": "0.4.1",
+++	"description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
+++	"type": "module",
+++	"license": "MIT",
+++	"author": "JiangXingChi",
+++	"repository": {
+++		"type": "git",
+++		"url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
+++	},
+++	"homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
+++	"bugs": {
+++		"url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
+++	},
+++	"engines": {
+++		"node": ">=22.19.0"
+++	},
+++	"keywords": [
+++		"pi-package",
+++		"pi",
+++		"pi-extension",
+++		"qq",
+++		"qqbot",
+++		"chatbot",
+++		"bridge"
+++	],
+++	"bin": "bin/pi-qq-connect.mjs",
+++	"pi": {
+++		"extensions": [
+++			"./index.js"
+++		]
+++	},
+++	"files": [
+++		"index.js",
+++		"src",
+++		"bin",
+++		"examples",
+++		"packaging",
+++		"scripts/install.sh",
+++		"scripts/uninstall.sh",
+++		"docs/ARCHITECTURE.md",
+++		"docs/DEVELOPMENT.md",
+++		"docs/PLAN.md",
+++		"README.md",
+++		"README.en.md",
+++		"LICENSE",
+++		"CHANGELOG.md"
+++	],
+++	"scripts": {
+++		"test": "node --test test/",
+++		"e2e": "node test/e2e.mjs",
+++		"e2e:service": "node test/e2e-service.mjs",
+++		"e2e:service-cmd": "node test/e2e-service-cmd.mjs",
+++		"prepublishOnly": "npm test"
+++	},
+++	"publishConfig": {
+++		"access": "public"
+++	}
++ }
++diff --git a/src/index.js b/src/index.js
++index b4c79c5..ea323e7 100644
++--- a/src/index.js
+++++ b/src/index.js
++@@ -36,6 +36,13 @@ function baseDir() {
++ 	return path.dirname(configPath());
++ }
++ 
+++/** AppID 是 9~10 位数字，maskId 对短 ID 不掩码，这里单独处理。 */
+++function maskAppId(id) {
+++	const text = String(id ?? "");
+++	if (text.length <= 6) return "***";
+++	return `${text.slice(0, 4)}***${text.slice(-3)}`;
+++}
+++
++ function lockFilePath() {
++ 	return path.join(baseDir(), "pi-qq-connect.lock");
++ }
++@@ -65,7 +72,9 @@ function newRuntime() {
++ 		bridge: undefined,
++ 		error: null,
++ 		starting: false,
++-		registered: false,
+++		startPending: undefined,
+++		owner: undefined,
+++		sessionCtx: undefined,
++ 		lastInbound: undefined,
++ 		lockWatch: undefined,
++ 		runner: undefined,
++@@ -79,20 +88,28 @@ const shared = root[RUNTIME_KEY] ?? (root[RUNTIME_KEY] = newRuntime());
++ 
++ /** 测试用：彻底清掉进程内状态。 */
++ export function resetRuntimeForTests() {
++-	shared.bridge?.stop();
++-	shared.gateway?.stop();
+++	shared.bridge?.stop?.();
+++	shared.gateway?.stop?.();
++ 	if (shared.lockWatch) clearInterval(shared.lockWatch);
++ 	Object.assign(shared, newRuntime());
+++	delete shared.seenInstances;
++ }
++ 
++ export default function createExtension(pi) {
++ 	const state = shared;
+++	// Pi 每换一次会话（/new、/resume、/fork、/reload）都会用新的 pi 句柄重跑扩展工厂，
+++	// 旧句柄随即永久作废。状态仍用进程级单例，但事件与命令必须按实例注册：
+++	// 否则新实例什么都不注册——/qq 等命令消失、session_start 收不到、
+++	// 桥只能在 30 秒看门狗超时后误判「桥失效」。
++ 	state.extensionApi = pi;
++ 	if (state.bridge) state.bridge.pi = pi;
++-	// 同一进程里被加载两次（例如自动发现 + 显式 --extension）时只注册一次，
++-	// 否则命令与事件监听会重复，一条 QQ 消息会被回复两次。
++-	if (state.registered) return state;
++-	state.registered = true;
+++	// 同一个对象被加载两次（自动发现 + 显式 --extension 命中同一路径）：别再注册一遍
+++	const seen = (state.seenInstances ??= new WeakSet());
+++	if (seen.has(pi)) return state;
+++	seen.add(pi);
+++
+++	// 但同一个会话里被加载两次时，pi 也可能是两个不同的对象。同一个事件会带同一个 ctx，
+++	// 所以再按 ctx 选举负责人，只让一个实例处理事件，避免一条 QQ 消息被回复两次。
++ 
++ 	function setStatus(label, detail) {
++ 		const text = detail ? `QQ: ${label} · ${detail}` : `QQ: ${label}`;
++@@ -190,11 +207,13 @@ export default function createExtension(pi) {
++ 				clearTimeout(timer);
++ 				const owner = state.pendingExec?.done === done;
++ 				if (owner) state.pendingExec = undefined;
++-				// 失败/超时时不会有 session_start，得自己把暂存队列放出来（只由发起者解开）
++-				if (!result?.ok && owner) state.bridge?.cancelSwitch();
+++				// 失败/超时：只有确认切换已经不在进行中，才由发起者解开暂存队列；
+++				// 仍在切换就交给 30 秒看门狗，别把马上要完成的切换判死
+++				if (!result?.ok && owner && !state.bridge?.switching) state.bridge?.cancelSwitch();
++ 				resolve(result);
++ 			};
++-			const timer = setTimeout(() => done({ ok: false, message: "Pi 20 秒内没有响应（可能正忙）" }), 20_000);
+++			// 超时要比 session.js 的 30 秒切换看门狗长：换会话本来就可能被忙着的模型拖慢
+++			const timer = setTimeout(() => done({ ok: false, message: "Pi 60 秒内没有完成会话切换（可能正忙）" }), 60_000);
++ 			timer.unref?.();
++ 			state.pendingExec = { done };
++ 			state.bridge?.beginSwitch();
++@@ -245,7 +264,11 @@ export default function createExtension(pi) {
++ 	}
++ 
++ 	async function start(ctx, { keepLock = false } = {}) {
++-		if (state.starting) return;
+++		if (state.starting) {
+++			// 正在起：记下这次的 ctx，等这一轮结束后再跑一次，别把新会话的 session_start 丢掉
+++			state.startPending = ctx ?? state.startPending;
+++			return;
+++		}
++ 		state.starting = true;
++ 		state.ctx = ctx ?? state.ctx;
++ 		try {
++@@ -331,18 +354,13 @@ export default function createExtension(pi) {
++ 				notify,
++ 			});
++ 			const bridge = new QqBridge({
++-				pi,
+++				pi: state.extensionApi ?? pi,
++ 				api,
++ 				config,
++ 				log: state.logger,
++ 				notify,
++ 				isOnline: () => state.gateway?.state === "connected",
++ 				onCommand: (command) => handleCommand(command),
++-				onFatal: () => {
++-					// 桥自己判定无法继续（通常是会话替换后句柄失效）：连网关一起收掉，避免静默吞消息
++-					stop();
++-					setStatus(STATE_LABEL.error, "会话切换后失效，需重启");
++-				},
++ 			});
++ 			const gateway = new QqGateway({
++ 				auth,
++@@ -365,7 +383,7 @@ export default function createExtension(pi) {
++ 			state.gateway = gateway;
++ 
++ 			setStatus(STATE_LABEL.connecting);
++-			state.logger.info(`启动网关：${config.sandbox ? "沙箱" : "正式"}环境，AppID ${maskId(config.appId)}`);
+++			state.logger.info(`启动网关：${config.sandbox ? "沙箱" : "正式"}环境，AppID ${maskAppId(config.appId)}`);
++ 			void gateway.start().catch((err) => {
++ 				state.error = err?.message ?? String(err);
++ 				state.logger.error(`网关启动失败：${state.error}`);
++@@ -373,6 +391,9 @@ export default function createExtension(pi) {
++ 			});
++ 		} finally {
++ 			state.starting = false;
+++			const pending = state.startPending;
+++			state.startPending = undefined;
+++			if (pending) void start(pending);
++ 		}
++ 	}
++ 
++@@ -383,7 +404,7 @@ export default function createExtension(pi) {
++ 		lines.push(`配置：${configPath()}${cfg ? "" : "（未加载）"}`);
++ 		if (state.error) lines.push(`错误：${state.error}`);
++ 		if (!cfg) return lines.join("\n");
++-		lines.push(`环境：${cfg.sandbox ? "沙箱" : "正式"} · AppID ${maskId(cfg.appId)}`);
+++		lines.push(`环境：${cfg.sandbox ? "沙箱" : "正式"} · AppID ${maskAppId(cfg.appId)}`);
++ 		lines.push(
++ 			`权限：allowAll=${cfg.allowAll} · 群 ${cfg.allowGroups.length} 个 · 用户 ${cfg.allowUsers.length} 个`,
++ 		);
++@@ -402,7 +423,10 @@ export default function createExtension(pi) {
++ 		lines.push(`锁：${lock ? `pid ${lock.pid}（${lock.at}）` : "无"}`);
++ 		if (state.bridge) {
++ 			const s = state.bridge.status;
++-			lines.push(`队列：${s.queue} 条${s.busy ? " · Pi 忙" : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`);
+++			const flags = [s.busy ? "Pi 忙" : "", s.stale ? "已暂停，等新会话接棒" : ""].filter(Boolean).join(" · ");
+++			lines.push(
+++				`队列：${s.queue} 条${flags ? ` · ${flags}` : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`,
+++			);
++ 		}
++ 		if (state.lastInbound) {
++ 			lines.push(`最近入站：${state.lastInbound.at} · ${state.lastInbound.kind} · 群/人 ${state.lastInbound.chat}`);
++@@ -601,48 +625,75 @@ export default function createExtension(pi) {
++ 	});
++ 
++ 	pi.on("session_start", (event, ctx) => {
+++		// 新会话 → 新 ctx：重新选举负责人（同一会话的重复加载共用同一个 ctx）
+++		if (state.sessionCtx !== ctx) {
+++			state.sessionCtx = ctx;
+++			state.owner = pi;
+++		} else if (state.owner && state.owner !== pi) {
+++			return;
+++		}
+++		state.owner = pi;
++ 		state.ctx = ctx;
++ 		state.extensionApi = pi;
++-		if (state.bridge) state.bridge.pi = pi;
++-
++-		// /new /resume /fork 只是换了 Pi 会话：网关、锁保留
++-		if (["new", "resume", "fork"].includes(event?.reason)) {
++-			if (!state.bridge) {
++-				// 没有活动桥（上一个实例的自己停了 / 被回收）：直接重建，别留一条没人管的网关
++-				notify(`会话已切换（${event.reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
++-				void start(ctx);
++-				return;
++-			}
++-			if (event.reason === "new") {
++-				state.bridge?.endSwitch();
++-			} else {
++-				// 手动 resume/fork：丢掉旧队列，重新开始
++-				state.bridge?.reset();
+++		const reason = event?.reason ?? "startup";
+++
+++		if (!state.bridge) {
+++			// 没有活动桥（首次启动，或上一个实例的桥已经停了）：直接重建
+++			if (reason !== "startup") {
+++				notify(`会话已切换（${reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
++ 			}
+++			void start(ctx);
++ 			return;
++ 		}
++-		void start(ctx);
+++
+++		// 新会话实例接棒：换成新句柄，别再用旧实例那个已作废的 pi
+++		state.bridge.adopt(pi);
+++
+++		// 换会话（含 reload）保留网关与锁，只把暂存消息放回来；
+++		// resume/fork 是手动换上下文，旧队列不再保留
+++		if (reason === "new" || reason === "resume" || reason === "fork" || state.bridge.switching) {
+++			state.bridge.endSwitch();
+++		} else {
+++			// 单纯重新加载（reload）：接棒后继续泵队列
+++			void state.bridge.pump();
+++		}
++ 	});
++ 
++ 	pi.on("session_shutdown", (event) => {
++-		// 同一进程换会话时保留网关和锁；只有退出/重载才收摊
++-		if (event?.reason === "new" || event?.reason === "resume" || event?.reason === "fork") return;
++-		stop();
+++		const reason = event?.reason ?? "unknown";
+++		if (state.owner !== pi) return;
+++		state.logger?.info(`session_shutdown(${reason})`);
+++		// 只有明确的退出类 reason 才收摊；其余（含 pi 以后新增的换会话 reason）一律按
+++		// 「旧句柄即将作废」处理：暂停注入、暂存消息，等新实例的 session_start 接棒。
+++		if (reason === "quit" || reason === "exit" || reason === "shutdown") {
+++			state.owner = undefined;
+++			stop();
+++			return;
+++		}
+++		if (reason !== "new" && reason !== "resume" && reason !== "fork" && reason !== "reload") {
+++			state.logger?.warn(`未知的 session_shutdown reason=${reason}，按换会话处理（保留网关）`);
+++		}
+++		state.owner = undefined;
+++		state.bridge?.beginSwitch();
++ 	});
++ 
++ 	pi.on("before_agent_start", (event) => {
+++		if (state.owner !== pi) return;
++ 		state.bridge?.onBeforeAgentStart(event);
++ 	});
++ 
++ 	pi.on("agent_start", () => {
+++		if (state.owner !== pi) return;
++ 		state.bridge?.onAgentStart();
++ 	});
++ 
++ 	pi.on("message_end", (event) => {
+++		if (state.owner !== pi) return;
++ 		state.bridge?.onMessageEnd(event.message);
++ 	});
++ 
++ 	pi.on("agent_settled", (event) => {
+++		if (state.owner !== pi) return;
++ 		state.bridge?.onAgentSettled(Boolean(event.aborted));
++ 	});
++ 
++diff --git a/src/session.js b/src/session.js
++index 6f66ab7..810e873 100644
++--- a/src/session.js
+++++ b/src/session.js
++@@ -91,7 +91,7 @@ export async function writeOverflowFile(body, cfg, log) {
++ }
++ 
++ export class QqBridge {
++-	constructor({ pi, api, config, log, notify, isOnline, onCommand, onFatal, injectTimeoutMs = 5000 }) {
+++	constructor({ pi, api, config, log, notify, isOnline, onCommand, injectTimeoutMs = 5000 }) {
++ 		this.pi = pi;
++ 		this.api = api;
++ 		this.cfg = config;
++@@ -106,8 +106,9 @@ export class QqBridge {
++ 		this.pumping = false;
++ 		this.injecting = false;
++ 		this.injectTimeoutMs = injectTimeoutMs;
++-		this.onFatal = onFatal;
+++		this.stale = false;
++ 		this.staleReported = false;
+++		this.retryCount = 0;
++ 		this.stopped = false;
++ 		this.seen = new Map();
++ 		this.lastByChat = new Map();
++@@ -125,29 +126,52 @@ export class QqBridge {
++ 		return {
++ 			queue: this.queue.length,
++ 			busy: this.running,
+++			stale: this.stale,
++ 			inflight: this.inflight ? { chat: chatKey(this.inflight.item), texts: this.inflight.texts.length } : null,
++ 			stats: { ...this.stats },
++ 		};
++ 	}
++ 
++-	/** 换会话/重建时清空队列与进行中的状态。 */
++-	reset() {
+++	/**
+++	 * 换会话/重建时清掉进行中的状态。
+++	 * keepQueue=true 时保留已排队、还没注入的消息（换会话不该把它们一起抹掉）。
+++	 */
+++	reset({ keepQueue = false } = {}) {
++ 		this.generation++;
++ 		this.#clearTimers();
++ 		this.#stopTyping(this.inflight);
++-		this.queue = [];
+++		if (!keepQueue) this.queue = [];
++ 		this.deferred = [];
++ 		this.inflight = undefined;
++ 		this.running = false;
++ 		this.injecting = false;
++ 	}
++ 
++-	/** 换会话开始：期间到达的消息先暂存，等 session_start 之后再放回队列。 */
+++	/**
+++	 * 新会话实例接棒：pi 每换会话都会重跑扩展工厂、换一个 pi 句柄，旧句柄随即作废。
+++	 * 这里把旧句柄换掉；如果之前因为等不到接手而暂停，顺便解除暂停。
+++	 */
+++	adopt(pi) {
+++		if (pi) this.pi = pi;
+++		if (!this.stale) return;
+++		this.stale = false;
+++		this.staleReported = false;
+++		this.injecting = false;
+++		this.log.info(`新会话实例已接管 QQ 桥，积压 ${this.queue.length} 条消息待处理`);
+++	}
+++
+++	/**
+++	 * 换会话开始：期间到达的消息先暂存，等 session_start 之后再放回队列。
+++	 * 可重复调用（QQ 侧 /new 会先调一次，session_shutdown 再调一次）：
+++	 * 已经在切换中时只续看门狗，绝不清空已暂存的消息。
+++	 */
++ 	beginSwitch() {
++-		this.switching = true;
++-		this.deferred = [];
++-		// 兜底：Pi 没给 session_start（拒绝/报错/被打断）时不能一直暂存消息
+++		if (!this.switching) {
+++			this.switching = true;
+++			this.deferred = [];
+++		}
++ 		if (this.switchTimer) clearTimeout(this.switchTimer);
+++		// 兜底：Pi 没给 session_start（拒绝/报错/被打断）时不能一直暂存消息
++ 		this.switchTimer = setTimeout(() => {
++ 			this.switchTimer = undefined;
++ 			if (!this.switching) return;
++@@ -164,18 +188,22 @@ export class QqBridge {
++ 		}
++ 	}
++ 
++-	/** 换会话结束（成功或失败）：清掉旧状态，把暂存的消息放回队列。 */
+++	/**
+++	 * 换会话完成：保留排队消息与暂存消息，丢掉属于旧会话的在途回答。
+++	 * 已经注入旧会话的那条没办法重放（模型可能已经动过手），只记一条日志。
+++	 */
++ 	endSwitch() {
++ 		this.#clearSwitchTimer();
++ 		const deferred = this.deferred;
+++		const inflight = this.inflight;
+++		const kept = this.queue;
++ 		this.deferred = [];
++ 		this.switching = false;
++ 		this.reset();
++-		if (deferred.length > 0) {
++-			this.queue.push(...deferred);
++-			this.log.info(`会话切换完成，恢复暂存的 ${deferred.length} 条消息`);
++-			void this.pump();
+++		if (inflight) {
+++			this.log.warn(`会话切换时有一条消息正在生成回答，该回答随旧会话丢弃（chat=${maskId(inflight.item.chatId)}）`);
++ 		}
+++		this.#restore([...kept, ...deferred], "会话切换完成");
++ 	}
++ 
++ 	/** 换会话失败：解除暂存，把消息放回队列，别把队列一起清了。 */
++@@ -185,11 +213,33 @@ export class QqBridge {
++ 		const deferred = this.deferred;
++ 		this.deferred = [];
++ 		this.switching = false;
++-		if (deferred.length > 0) {
++-			this.queue.push(...deferred);
++-			this.log.info(`开新会话失败，放回暂存的 ${deferred.length} 条消息`);
++-			void this.pump();
+++		this.#restore(deferred, "开新会话失败");
+++	}
+++
+++	/**
+++	 * 把暂存/排队过的消息放回桥里。
+++	 * 斜杠命令在暂存期间没法执行（旧句柄已死），这里重新解析一遍交给命令通道，
+++	 * 绝不当作普通提问喂给模型（AGENTS.md：斜杠命令不进模型）。
+++	 */
+++	#restore(items, label) {
+++		if (items.length === 0) return;
+++		const commands = [];
+++		for (const item of items) {
+++			const command = parseCommand(item.text);
+++			if (command) commands.push({ item, command });
+++			else this.queue.push(item);
+++		}
+++		if (this.queue.length > 0) this.log.info(`${label}，恢复 ${this.queue.length} 条消息`);
+++		if (commands.length > 0) {
+++			this.log.info(`${label}，补跑 ${commands.length} 条命令`);
+++			void (async () => {
+++				for (const { item, command } of commands) {
+++					if (this.stopped || this.stale) return;
+++					await this.#runCommand(item, command);
+++				}
+++			})();
++ 		}
+++		void this.pump();
++ 	}
++ 
++ 	/** 直接回一条纯文本（命令的答复），不走模型、不占队列。 */
++@@ -418,7 +468,7 @@ export class QqBridge {
++ 	}
++ 
++ 	async pump() {
++-		if (this.stopped || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
+++		if (this.stopped || this.stale || this.switching || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
++ 		this.pumping = true;
++ 		try {
++ 			await this.#pumpOnce();
++@@ -459,9 +509,10 @@ export class QqBridge {
++ 		);
++ 		const images = downloaded.filter(Boolean);
++ 
++-		// 下载期间可能被 stop()、换会话或已经排了新消息
++-		if (this.stopped || generation !== this.generation) {
++-			if (generation === this.generation) this.queue.unshift(item);
+++		// 下载期间可能被 stop()、换会话或已经排了新消息：放回队首，别把这条吞掉
+++		if (this.stopped) return;
+++		if (generation !== this.generation || this.switching || this.stale) {
+++			this.queue.unshift(item);
++ 			return;
++ 		}
++ 
++@@ -477,10 +528,10 @@ export class QqBridge {
++ 		};
++ 		this.inflight = inflight;
++ 
++-		if (generation !== this.generation) return;
++ 		try {
++ 			const content = images.length > 0 ? [{ type: "text", text: prompt.text }, ...images] : prompt.text;
++ 			this.pi.sendUserMessage(content, item.expandTemplates ? { expandPromptTemplates: true } : undefined);
+++			this.retryCount = 0;
++ 			this.log.info(`已注入 Pi（chat=${maskId(item.chatId)}，图片 ${images.length} 张）`);
++ 			// Pi 的 sendUserMessage 是 fire-and-forget，异步失败不会抛回来；靠看门狗兜底
++ 			this.#armInjectWatchdog(inflight);
++@@ -502,42 +553,59 @@ export class QqBridge {
++ 	}
++ 
++ 	/**
++-	 * 会话被替换后旧 pi 句柄永久失效：一次性告警、回执 QQ、停桥并交上层收尾。
++-	 * 绝不能再走 #scheduleRetry：那条路径每 2 秒重试一次且没有上限。
+++	 * 会话被替换：旧 pi 句柄永久失效。
+++	 *
+++	 * 不能每 2 秒重试（会无限刷），也不能把网关一起收掉——新会话实例很快就会通过
+++	 * adopt() 接棒。所以这里只暂停：保留队列、网关和切换状态（switching/deferred 归
+++	 * endSwitch/cancelSwitch 管），回一条提示，等新实例接手后自动继续。
++ 	 */
++ 	#failOnStale(item, err) {
++-		if (this.staleReported) return;
++-		this.staleReported = true;
++ 		const reason = err?.message ?? String(err);
++-		this.log.error(`会话已被替换，QQ 桥失效，停止桥接：${reason}`);
+++		const first = !this.stale;
+++		this.stale = true;
+++		if (first) {
+++			this.staleReported = true;
+++			this.log.error(`会话已被替换，暂停注入直到新会话实例接棒：${reason}`);
+++		}
+++
+++		// 丢掉在途轮次（回答属于旧会话，收不回来了），把消息还回去等接棒后重发
+++		const inflight = this.inflight;
+++		this.generation++;
+++		this.#clearTimers();
+++		this.#stopTyping(inflight);
+++		this.inflight = undefined;
+++		this.injecting = false;
+++		if (item && !this.stopped) {
+++			if (this.switching) this.deferred.unshift(item);
+++			else this.queue.unshift(item);
+++		}
+++
+++		if (!first) return;
++ 		try {
++ 			const sending = this.api?.sendText?.(
++ 				replyTarget(item),
++-				"⚠️ Pi 会话已切换，这个 QQ 桥已失效。请在终端执行 /qq stop 再 /qq start 恢复。",
+++				"⚠️ Pi 会话已切换，QQ 桥正在等新会话接棒；刚才这条会在接棒后自动重试。",
++ 				{ msgId: item.msgId, msgSeq: this.#nextSeq({ seqs: new Set(), attemptsLeft: 1 }) },
++ 			);
++ 			if (sending && typeof sending.catch === "function") {
++-				sending.catch((sendErr) => this.log.warn(`失效提示发送失败：${sendErr?.message ?? sendErr}`));
+++				sending.catch((sendErr) => this.log.warn(`切换提示发送失败：${sendErr?.message ?? sendErr}`));
++ 			}
++ 		} catch {
++-			// 网关可能已经不可用，回执失败不影响停桥
++-		}
++-		this.notify("QQ 桥已随会话切换失效，已停止重试：请在终端 /qq stop 再 /qq start", "warning");
++-		this.stop();
++-		try {
++-			this.onFatal?.(err);
++-		} catch {
++-			// 上层收尾失败不影响已经停掉的桥
+++			// 网关可能已经不可用，回执失败不影响接棒
++ 		}
+++		this.notify("QQ 桥已暂停：Pi 会话被替换，等新会话接手后自动恢复", "warning");
++ 	}
++ 
++ 	#scheduleRetry() {
++ 		if (this.retryTimer || this.stopped) return;
+++		// 退避：2s → 4s → 8s … 最多 30s。否则一条永久失败的消息会每 2 秒刷一次日志并堵住队列
+++		this.retryCount = (this.retryCount ?? 0) + 1;
+++		const delay = Math.min(2000 * 2 ** (this.retryCount - 1), 30_000);
++ 		this.retryTimer = setTimeout(() => {
++ 			this.retryTimer = undefined;
++ 			this.injecting = false;
++ 			void this.pump();
++-		}, 2000);
+++		}, delay);
++ 		this.retryTimer.unref?.();
++ 	}
++ 
++diff --git a/test/e2e-service-cmd.mjs b/test/e2e-service-cmd.mjs
++index 163ca29..f64b2a6 100644
++--- a/test/e2e-service-cmd.mjs
+++++ b/test/e2e-service-cmd.mjs
++@@ -14,6 +14,8 @@ import { startMockQq } from "./mock-qq.mjs";
++ 
++ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-svccmd-"));
+++// 隔离的 Pi 配置目录，避免加载用户已安装的同名插件
+++const agentDir = path.join(dir, "agent");
++ const configPath = path.join(dir, "config.json");
++ const sessionDir = path.join(dir, "sessions");
++ fs.mkdirSync(sessionDir, { recursive: true });
++@@ -37,7 +39,7 @@ fs.writeFileSync(
++ 
++ const child = spawn("pi", ["--mode", "rpc", "--session-dir", sessionDir, "--no-extensions", "--extension", root], {
++ 	cwd: dir,
++-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
+++	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
++ 	stdio: ["pipe", "pipe", "pipe"],
++ });
++ let output = "";
++diff --git a/test/e2e-service.mjs b/test/e2e-service.mjs
++index efddf36..0549c8e 100644
++--- a/test/e2e-service.mjs
+++++ b/test/e2e-service.mjs
++@@ -16,6 +16,8 @@ import { startMockQq } from "./mock-qq.mjs";
++ 
++ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-svc-"));
+++// 隔离的 Pi 配置目录：否则会加载用户已 `pi install` 的同一插件，第二条网关连线把用例搅黄
+++const agentDir = path.join(dir, "agent");
++ const configPath = path.join(dir, "config.json");
++ const sessionDir = path.join(dir, "sessions");
++ fs.mkdirSync(sessionDir, { recursive: true });
++@@ -39,7 +41,7 @@ fs.writeFileSync(
++ 
++ const child = spawn(process.execPath, [path.join(root, "bin", "pi-qq-connect.mjs"), "--cwd", dir, "--session-id", "pi-qq-e2e-service"], {
++ 	cwd: dir,
++-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
+++	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
++ 	stdio: ["ignore", "pipe", "pipe"],
++ });
++ let output = "";
++@@ -79,7 +81,7 @@ if (state.pid !== child.pid) {
++ // 第二个服务实例应被拒绝
++ const second = spawn(process.execPath, [path.join(root, "bin", "pi-qq-connect.mjs"), "--cwd", dir, "--session-id", "dup"], {
++ 	cwd: dir,
++-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
+++	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
++ 	stdio: ["ignore", "pipe", "pipe"],
++ });
++ const secondExit = await new Promise((resolve) => {
++diff --git a/test/e2e.mjs b/test/e2e.mjs
++index 791f970..f415eec 100644
++--- a/test/e2e.mjs
+++++ b/test/e2e.mjs
++@@ -57,7 +57,7 @@ child.stdout.on("data", () => {
++ 
++ function fail(message) {
++ 	console.error(`✖ ${message}`);
++-	if (stderr.trim()) console.error("--- pi stderr ---\n" + stderr.trim().slice(-3000));
+++	if (stderr.trim()) console.error("--- pi stderr ---\n" + stderr.trim());
++ 	console.error(`--- 扩展日志 ---\n${safeLog()}`);
++ 	child.kill("SIGTERM");
++ 	void mock.stop().then(() => process.exit(1));
++@@ -65,7 +65,7 @@ function fail(message) {
++ 
++ function safeLog() {
++ 	try {
++-		return fs.readFileSync(logPath, "utf8").trim().slice(-3000) || "（空）";
+++		return fs.readFileSync(logPath, "utf8").trim() || "（空）";
++ 	} catch {
++ 		return "（无日志）";
++ 	}
++@@ -100,16 +100,33 @@ try {
++ 	if (!(sent.body.msg_seq >= 1 && sent.body.msg_seq < 65536)) throw new Error(`msg_seq 不在 0..65535：${sent.body.msg_seq}`);
++ 	if (sent.type !== "private") throw new Error(`目标类型不对：${sent.type}`);
++ 
++-	// /qq new：QQ 里发命令，切到新 Pi 会话，网关不断，新会话还能继续聊
+++	// /new：QQ 里发命令，切到新 Pi 会话，网关不断，命令保持可用，新会话还能继续聊
++ 	const identifiesBefore = mock.state.identifies.length;
++-	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-new-1", userOpenId: "e2e-user", content: "/qq new" }), "e2e-new-1");
++-	await until(() => mock.state.sends.some((s) => /已开新会话/.test(String(s.body.content ?? ""))), "新会话回执");
++-	console.log("✔ QQ 收到「已开新会话」回执");
+++	const sendsBefore = mock.state.sends.length;
+++	const newStartedAt = Date.now();
+++	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-new-1", userOpenId: "e2e-user", content: "/new" }), "e2e-new-1");
+++	await until(
+++		() => mock.state.sends.slice(sendsBefore).some((s) => /已开新会话/.test(String(s.body.content ?? ""))),
+++		"新会话回执",
+++	);
+++	const switchMs = Date.now() - newStartedAt;
+++	console.log(`✔ QQ 收到「已开新会话」回执（${switchMs}ms）`);
+++	// 0.4.0 的 bug 会让回执一直等到 30 秒看门狗超时；这里卡 10 秒
+++	if (switchMs > 10_000) throw new Error(`换会话太慢：${switchMs}ms（疑似又走了 30 秒看门狗）`);
++ 
++ 	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-msg-2", userOpenId: "e2e-user", content: "请只回复：pong2" }), "e2e-msg-2");
++ 	await until(() => mock.state.sends.some((s) => /pong2/i.test(String(s.body.content ?? ""))), "新会话里继续对话");
++ 	console.log("✔ 新会话里继续对话成功");
++-	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/qq new 期间网关被重连了");
+++	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/new 期间网关被重连了");
+++
+++	// 换会话后命令必须仍然可用（扩展实例被重新注册），且不能再报「桥已失效」
+++	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-status-1", userOpenId: "e2e-user", content: "/qq status" }), "e2e-status-1");
+++	await until(() => mock.state.sends.some((s) => /网关：/.test(String(s.body.content ?? ""))), "换会话后 /qq status 仍可用");
+++	console.log("✔ 换会话后 /qq status 仍可用");
+++	const logText = safeLog();
+++	if (/stale after session replacement/i.test(logText)) throw new Error("换会话后出现 stale 报错");
+++	if (/换会话 30 秒内没有完成/.test(logText)) throw new Error("换会话没收到 session_start，走了 30 秒看门狗");
+++	if (/QQ 桥已暂停/.test(logText)) throw new Error("换会话后桥被误判失效");
++ 
++ 	const sessionFiles = fs.readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
++ 	if (sessionFiles.length < 2) throw new Error(`新会话没有落盘，只有 ${sessionFiles.length} 个 session 文件`);
++diff --git a/test/harness.mjs b/test/harness.mjs
++index b604eae..120a132 100644
++--- a/test/harness.mjs
+++++ b/test/harness.mjs
++@@ -10,6 +10,7 @@ export function createFakePi() {
++ 	const handlers = new Map();
++ 	const sent = [];
++ 	const commands = new Map();
+++	const commandRegistrations = [];
++ 	const pi = {
++ 		streaming: false,
++ 		on(name, fn) {
++@@ -22,6 +23,7 @@ export function createFakePi() {
++ 			};
++ 		},
++ 		registerCommand(name, options) {
+++			commandRegistrations.push(name);
++ 			commands.set(name, options);
++ 		},
++ 		sendUserMessage(content, options) {
++@@ -43,6 +45,7 @@ export function createFakePi() {
++ 		pi,
++ 		sent,
++ 		commands,
+++		commandRegistrations,
++ 		async emit(name, payload, ctx) {
++ 			for (const fn of handlers.get(name) ?? []) await fn(payload, ctx);
++ 		},
++diff --git a/test/stale-session.test.mjs b/test/stale-session.test.mjs
++index 588eb7e..4f30d98 100644
++--- a/test/stale-session.test.mjs
+++++ b/test/stale-session.test.mjs
++@@ -2,7 +2,7 @@
++  * 会话切换回归测试（不连 QQ 网关、不碰真实会话）。
++  *
++  *   P0 isStaleContextError 只认 pi 的 stale 文案
++- *   P1 stale 注入 → 停桥 + 一次性告警 + onFatal，不再每 2 秒无限重试
+++ *   P1 stale 注入 → 暂停注入（不停桥、不无限重试），新实例接手后自动恢复
++  *   P2 session_start(new|resume|fork) 且没有活动桥 → 重建（自愈）
++  *   P3 switchSession 按 pi 文档传 withSession
++  */
++@@ -56,49 +56,68 @@ test("P0 isStaleContextError 识别", async (t) => {
++ 	});
++ });
++ 
++-test("P1 stale 注入不再无限重试", async (t) => {
+++test("P1 stale 注入只暂停，接棒后恢复", async (t) => {
++ 	const logs = [];
++ 	const notes = [];
++-	let fatal = 0;
+++	const sends = [];
+++	let attempts = 0;
+++	const stalePi = {
+++		sendUserMessage() {
+++			attempts++;
+++			throw new Error(STALE);
+++		},
+++	};
++ 	const bridge = new QqBridge({
++-		pi: {
++-			sendUserMessage() {
++-				throw new Error(STALE);
+++		pi: stalePi,
+++		api: {
+++			sendText: async (target, content) => {
+++				sends.push({ target, content });
++ 			},
++ 		},
++-		api: { sendText: () => ({}) },
++ 		config: makeCfg(),
++ 		log: makeLog(logs),
++ 		notify: (message) => notes.push(message),
++ 		isOnline: () => true,
++ 		onNewSession: () => {},
++-		onFatal: (err) => {
++-			fatal++;
++-			assert.equal(isStaleContextError(err), true);
++-		},
++ 		injectTimeoutMs: 0,
++ 	});
++ 	bridge.enqueue(makeItem());
++-	await sleep(300);
+++	await waitFor(() => bridge.stale === true, { label: "进入 stale 状态" });
++ 
++-	await t.test("桥已停止", () => assert.equal(bridge.stopped, true));
++-	await t.test("没有残留重试定时器", () => {
+++	await t.test("桥没有自毁（网关仍在）", () => assert.equal(bridge.stopped, false));
+++	await t.test("标记 stale 并停止重试", () => {
+++		assert.equal(bridge.stale, true);
++ 		assert.equal(bridge.retryTimer, undefined);
++ 		assert.equal(bridge.injectTimer, undefined);
+++		assert.equal(attempts, 1, "stale 后不应再重试注入");
++ 	});
++-	await t.test("队列清空、无 inflight", () => {
++-		assert.equal(bridge.queue.length, 0);
+++	await t.test("没处理的消息留在队列里等接棒", () => {
++ 		assert.equal(bridge.inflight, undefined);
+++		assert.equal(bridge.queue.length, 1);
++ 	});
++-	await t.test("onFatal 只调用一次", () => assert.equal(fatal, 1));
++ 	await t.test("stale 只记一次 error，不再打「等空闲后重试」", () => {
++ 		const staleLines = logs.filter((l) => /stale after session replacement/i.test(l.message));
++ 		assert.equal(staleLines.length, 1, `stale 记录 ${staleLines.length} 条`);
++ 		assert.equal(logs.filter((l) => l.message.includes("等空闲后重试")).length, 0);
++ 	});
++-	await t.test("给 QQ 的提示带 /qq stop", () => {
++-		assert.ok(notes.some((n) => n.includes("/qq stop")), "缺少 /qq stop 提示");
+++	await t.test("提示不再要求用户手动 /qq stop", () => {
+++		assert.ok(notes.some((n) => n.includes("自动恢复")), "缺少自动恢复提示");
+++		assert.ok(sends.some((s) => String(s.content).includes("接棒")), "缺少给 QQ 的提示");
++ 	});
+++
+++	await t.test("新实例接手后自动恢复（走生产路径 adopt + endSwitch）", async () => {
+++		const injected = [];
+++		bridge.adopt({
+++			sendUserMessage(content) {
+++				injected.push(content);
+++			},
+++		});
+++		assert.equal(bridge.stale, false);
+++		bridge.endSwitch();
+++		await waitFor(() => injected.length >= 1, { label: "接棒后重新注入积压消息" });
+++		assert.equal(bridge.queue.length, 0, "积压消息应被处理完");
+++	});
+++	bridge.stop();
++ });
++ 
++ test("P1 非 stale 错误仍保留原有重试行为（防回归）", async (t) => {
++@@ -180,15 +199,19 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
++ 	await t.test("state.ctx 指向新会话上下文", () => assert.equal(state.ctx, firstCtx));
++ 
++ 	let ended = 0;
++-	let reset = 0;
+++	let adopted = 0;
++ 	state.bridge = {
++ 		pi: null,
++-		endSwitch: () => {
++-			ended++;
+++		switching: false,
+++		adopt(pi) {
+++			adopted++;
+++			this.pi = pi;
++ 		},
++-		reset: () => {
++-			reset++;
+++		endSwitch() {
+++			ended++;
+++			this.switching = false;
++ 		},
+++		reset() {},
++ 	};
++ 	const secondCtx = makeCtx();
++ 	const before = notifications.length;
++@@ -202,8 +225,9 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
++ 	await t.test("有桥时刷新 bridge.pi", () => assert.equal(state.bridge.pi, fake.pi));
++ 
++ 	await fake.emit("session_start", { reason: "resume" }, makeCtx());
++-	await t.test("resume 时重置队列", () => {
++-		assert.equal(reset, 1);
+++	await t.test("resume 同样接棒并结束切换", () => {
+++		assert.equal(adopted, 2);
+++		assert.equal(ended, 2);
++ 		assert.equal(state.ctx, nextCtx);
++ 	});
++ 	state.bridge = undefined;
+diff --git a/src/auth.js b/src/auth.js
+index 33b5295..a8479a9 100644
+--- a/src/auth.js
++++ b/src/auth.js
+@@ -36,7 +36,9 @@ export class QqAuth {
+ 
+ 	/** 供日志使用的脱敏版本 */
+ 	describe() {
+-		return `appId=${this.appId} token=${this.token ? "cached" : "none"}`;
++		const id = String(this.appId ?? "");
++		const masked = id.length <= 6 ? "***" : `${id.slice(0, 4)}***${id.slice(-3)}`;
++		return `appId=${masked} token=${this.token ? "cached" : "none"}`;
+ 	}
+ 
+ 	async #fetchToken() {
+diff --git a/src/index.js b/src/index.js
+index b4c79c5..b689a69 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -36,6 +36,13 @@ function baseDir() {
+ 	return path.dirname(configPath());
+ }
+ 
++/** AppID 是 9~10 位数字，maskId 对短 ID 不掩码，这里单独处理。 */
++function maskAppId(id) {
++	const text = String(id ?? "");
++	if (text.length <= 6) return "***";
++	return `${text.slice(0, 4)}***${text.slice(-3)}`;
++}
++
+ function lockFilePath() {
+ 	return path.join(baseDir(), "pi-qq-connect.lock");
+ }
+@@ -65,7 +72,9 @@ function newRuntime() {
+ 		bridge: undefined,
+ 		error: null,
+ 		starting: false,
+-		registered: false,
++		startPending: undefined,
++		owner: undefined,
++		sessionCtx: undefined,
+ 		lastInbound: undefined,
+ 		lockWatch: undefined,
+ 		runner: undefined,
+@@ -79,20 +88,28 @@ const shared = root[RUNTIME_KEY] ?? (root[RUNTIME_KEY] = newRuntime());
+ 
+ /** 测试用：彻底清掉进程内状态。 */
+ export function resetRuntimeForTests() {
+-	shared.bridge?.stop();
+-	shared.gateway?.stop();
++	shared.bridge?.stop?.();
++	shared.gateway?.stop?.();
+ 	if (shared.lockWatch) clearInterval(shared.lockWatch);
+ 	Object.assign(shared, newRuntime());
++	delete shared.seenInstances;
+ }
+ 
+ export default function createExtension(pi) {
+ 	const state = shared;
++	// Pi 每换一次会话（/new、/resume、/fork、/reload）都会用新的 pi 句柄重跑扩展工厂，
++	// 旧句柄随即永久作废。状态仍用进程级单例，但事件与命令必须按实例注册：
++	// 否则新实例什么都不注册——/qq 等命令消失、session_start 收不到、
++	// 桥只能在 30 秒看门狗超时后误判「桥失效」。
+ 	state.extensionApi = pi;
+ 	if (state.bridge) state.bridge.pi = pi;
+-	// 同一进程里被加载两次（例如自动发现 + 显式 --extension）时只注册一次，
+-	// 否则命令与事件监听会重复，一条 QQ 消息会被回复两次。
+-	if (state.registered) return state;
+-	state.registered = true;
++	// 同一个对象被加载两次（自动发现 + 显式 --extension 命中同一路径）：别再注册一遍
++	const seen = (state.seenInstances ??= new WeakSet());
++	if (seen.has(pi)) return state;
++	seen.add(pi);
++
++	// 但同一个会话里被加载两次时，pi 也可能是两个不同的对象。同一个事件会带同一个 ctx，
++	// 所以再按 ctx 选举负责人，只让一个实例处理事件，避免一条 QQ 消息被回复两次。
+ 
+ 	function setStatus(label, detail) {
+ 		const text = detail ? `QQ: ${label} · ${detail}` : `QQ: ${label}`;
+@@ -189,12 +206,16 @@ export default function createExtension(pi) {
+ 				settled = true;
+ 				clearTimeout(timer);
+ 				const owner = state.pendingExec?.done === done;
++				const pending = state.pendingExec;
+ 				if (owner) state.pendingExec = undefined;
+-				// 失败/超时时不会有 session_start，得自己把暂存队列放出来（只由发起者解开）
+-				if (!result?.ok && owner) state.bridge?.cancelSwitch();
++				// 失败/取消：如果这次确实已经开始换会话（见过 session_shutdown），就交给看门狗与接棒；
++				// 纯失败（被取消、报错、超时且根本没换）必须立刻把暂存队列放回去，别让整桥停 30 秒
++				if (!result?.ok && owner && !pending?.sawShutdown) state.bridge?.cancelSwitch();
+ 				resolve(result);
+ 			};
+-			const timer = setTimeout(() => done({ ok: false, message: "Pi 20 秒内没有响应（可能正忙）" }), 20_000);
++			// 略长于 session.js 的 30 秒切换看门狗：看门狗先恢复队列，这里再清掉 pendingExec，
++			// 免得用户在 31~60 秒之间发 /new 还被「上一个还在进行中」挡住
++			const timer = setTimeout(() => done({ ok: false, message: "Pi 35 秒内没有完成会话切换（可能正忙）" }), 35_000);
+ 			timer.unref?.();
+ 			state.pendingExec = { done };
+ 			state.bridge?.beginSwitch();
+@@ -245,7 +266,11 @@ export default function createExtension(pi) {
+ 	}
+ 
+ 	async function start(ctx, { keepLock = false } = {}) {
+-		if (state.starting) return;
++		if (state.starting) {
++			// 正在起：记下这次的 ctx，等这一轮结束后再跑一次，别把新会话的 session_start 丢掉
++			state.startPending = ctx ?? state.startPending;
++			return;
++		}
+ 		state.starting = true;
+ 		state.ctx = ctx ?? state.ctx;
+ 		try {
+@@ -331,18 +356,13 @@ export default function createExtension(pi) {
+ 				notify,
+ 			});
+ 			const bridge = new QqBridge({
+-				pi,
++				pi: state.extensionApi ?? pi,
+ 				api,
+ 				config,
+ 				log: state.logger,
+ 				notify,
+ 				isOnline: () => state.gateway?.state === "connected",
+ 				onCommand: (command) => handleCommand(command),
+-				onFatal: () => {
+-					// 桥自己判定无法继续（通常是会话替换后句柄失效）：连网关一起收掉，避免静默吞消息
+-					stop();
+-					setStatus(STATE_LABEL.error, "会话切换后失效，需重启");
+-				},
+ 			});
+ 			const gateway = new QqGateway({
+ 				auth,
+@@ -365,7 +385,7 @@ export default function createExtension(pi) {
+ 			state.gateway = gateway;
+ 
+ 			setStatus(STATE_LABEL.connecting);
+-			state.logger.info(`启动网关：${config.sandbox ? "沙箱" : "正式"}环境，AppID ${maskId(config.appId)}`);
++			state.logger.info(`启动网关：${config.sandbox ? "沙箱" : "正式"}环境，AppID ${maskAppId(config.appId)}`);
+ 			void gateway.start().catch((err) => {
+ 				state.error = err?.message ?? String(err);
+ 				state.logger.error(`网关启动失败：${state.error}`);
+@@ -373,6 +393,18 @@ export default function createExtension(pi) {
+ 			});
+ 		} finally {
+ 			state.starting = false;
++			const pending = state.startPending;
++			state.startPending = undefined;
++			if (pending) {
++				if (state.bridge) {
++					// 桥已经建好：只需要把新会话的 ctx 接过来，重启一遍会白断网关、丢队列
++					state.ctx = pending;
++					state.bridge.adopt(state.extensionApi ?? pi);
++					void state.bridge.pump();
++				} else {
++					void start(pending);
++				}
++			}
+ 		}
+ 	}
+ 
+@@ -383,7 +415,7 @@ export default function createExtension(pi) {
+ 		lines.push(`配置：${configPath()}${cfg ? "" : "（未加载）"}`);
+ 		if (state.error) lines.push(`错误：${state.error}`);
+ 		if (!cfg) return lines.join("\n");
+-		lines.push(`环境：${cfg.sandbox ? "沙箱" : "正式"} · AppID ${maskId(cfg.appId)}`);
++		lines.push(`环境：${cfg.sandbox ? "沙箱" : "正式"} · AppID ${maskAppId(cfg.appId)}`);
+ 		lines.push(
+ 			`权限：allowAll=${cfg.allowAll} · 群 ${cfg.allowGroups.length} 个 · 用户 ${cfg.allowUsers.length} 个`,
+ 		);
+@@ -402,7 +434,10 @@ export default function createExtension(pi) {
+ 		lines.push(`锁：${lock ? `pid ${lock.pid}（${lock.at}）` : "无"}`);
+ 		if (state.bridge) {
+ 			const s = state.bridge.status;
+-			lines.push(`队列：${s.queue} 条${s.busy ? " · Pi 忙" : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`);
++			const flags = [s.busy ? "Pi 忙" : "", s.stale ? "已暂停，等新会话接棒" : ""].filter(Boolean).join(" · ");
++			lines.push(
++				`队列：${s.queue} 条${flags ? ` · ${flags}` : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`,
++			);
+ 		}
+ 		if (state.lastInbound) {
+ 			lines.push(`最近入站：${state.lastInbound.at} · ${state.lastInbound.kind} · 群/人 ${state.lastInbound.chat}`);
+@@ -532,8 +567,13 @@ export default function createExtension(pi) {
+ 		setStatus(STATE_LABEL.stopped);
+ 	}
+ 
+-	pi.registerCommand("qq", {
+-		description: "QQ 机器人：status / start / stop / log / take（/new 请直接用 /new）",
++	// 命令不能在同会话的两个实例里各注册一次：pi 对同名命令的处理是「谁都别执行」。
++	let commandsRegistered = false;
++	function registerCommands() {
++		if (commandsRegistered) return;
++		commandsRegistered = true;
++		pi.registerCommand("qq", {
++			description: "QQ 机器人：status / start / stop / log / take（/new 请直接用 /new）",
+ 		handler: async (args, ctx) => {
+ 			state.ctx = ctx;
+ 			const [sub, ...rest] = String(args ?? "").trim().split(/\s+/);
+@@ -598,51 +638,83 @@ export default function createExtension(pi) {
+ 					notify(HELP, "info");
+ 			}
+ 		},
+-	});
++		});
++	}
+ 
+ 	pi.on("session_start", (event, ctx) => {
++		// 新会话 → 新 ctx：重新选举负责人（同一会话的重复加载共用同一个 ctx）
++		if (state.sessionCtx !== ctx) {
++			state.sessionCtx = ctx;
++			state.owner = pi;
++		} else if (state.owner && state.owner !== pi) {
++			return;
++		}
++		state.owner = pi;
+ 		state.ctx = ctx;
+ 		state.extensionApi = pi;
+-		if (state.bridge) state.bridge.pi = pi;
+-
+-		// /new /resume /fork 只是换了 Pi 会话：网关、锁保留
+-		if (["new", "resume", "fork"].includes(event?.reason)) {
+-			if (!state.bridge) {
+-				// 没有活动桥（上一个实例的自己停了 / 被回收）：直接重建，别留一条没人管的网关
+-				notify(`会话已切换（${event.reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
+-				void start(ctx);
+-				return;
+-			}
+-			if (event.reason === "new") {
+-				state.bridge?.endSwitch();
+-			} else {
+-				// 手动 resume/fork：丢掉旧队列，重新开始
+-				state.bridge?.reset();
++		const reason = event?.reason ?? "startup";
++		// 每个会话只由选中的实例注册一次命令（同名重复注册会让命令彻底失效）
++		registerCommands();
++
++		if (!state.bridge) {
++			// 没有活动桥（首次启动，或上一个实例的桥已经停了）：直接重建
++			if (reason !== "startup") {
++				notify(`会话已切换（${reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
+ 			}
++			void start(ctx);
+ 			return;
+ 		}
+-		void start(ctx);
++
++		// 新会话实例接棒：换成新句柄，别再用旧实例那个已作废的 pi
++		state.bridge.adopt(pi);
++
++		// 换会话（含 reload、resume、fork）都保留网关、锁和排队消息，只把暂存条目放回来；
++		// 没经历 beginSwitch 的 session_start 不能调 endSwitch，否则会重置一个健康会话的在途轮次
++		if (state.bridge.switching) {
++			state.bridge.endSwitch();
++		} else {
++			void state.bridge.pump();
++		}
+ 	});
+ 
+ 	pi.on("session_shutdown", (event) => {
+-		// 同一进程换会话时保留网关和锁；只有退出/重载才收摊
+-		if (event?.reason === "new" || event?.reason === "resume" || event?.reason === "fork") return;
+-		stop();
++		const reason = event?.reason ?? "unknown";
++		// owner 为 undefined（例如上一个实例刚退出、新的 session_start 还没来）时允许处理，
++		// 否则退出时没人收摊、换会话时也没人暂停注入
++		if (state.owner && state.owner !== pi) return;
++		state.logger?.info(`session_shutdown(${reason})`);
++		// 只有明确的退出类 reason 才收摊；其余（含 pi 以后新增的换会话 reason）一律按
++		// 「旧句柄即将作废」处理：暂停注入、暂存消息，等新实例的 session_start 接棒。
++		if (reason === "quit" || reason === "exit" || reason === "shutdown") {
++			state.owner = undefined;
++			stop();
++			return;
++		}
++		if (reason !== "new" && reason !== "resume" && reason !== "fork" && reason !== "reload") {
++			state.logger?.warn(`未知的 session_shutdown reason=${reason}，按换会话处理（保留网关）`);
++		}
++		// 这次是真换了会话：请求侧超时/取消时不要再 cancelSwitch（交给看门狗与接棒）
++		if (state.pendingExec) state.pendingExec.sawShutdown = true;
++		state.bridge?.beginSwitch();
+ 	});
+ 
+ 	pi.on("before_agent_start", (event) => {
++		if (state.owner !== pi) return;
+ 		state.bridge?.onBeforeAgentStart(event);
+ 	});
+ 
+ 	pi.on("agent_start", () => {
++		if (state.owner !== pi) return;
+ 		state.bridge?.onAgentStart();
+ 	});
+ 
+ 	pi.on("message_end", (event) => {
++		if (state.owner !== pi) return;
+ 		state.bridge?.onMessageEnd(event.message);
+ 	});
+ 
+ 	pi.on("agent_settled", (event) => {
++		if (state.owner !== pi) return;
+ 		state.bridge?.onAgentSettled(Boolean(event.aborted));
+ 	});
+ 
+diff --git a/src/session.js b/src/session.js
+index 6f66ab7..22f1cbf 100644
+--- a/src/session.js
++++ b/src/session.js
+@@ -23,6 +23,15 @@ export function isStaleContextError(err) {
+ 	return /stale after session replacement or reload/i.test(String(err?.message ?? err ?? ""));
+ }
+ 
++/** QQ 多媒体 URL 带 appid/fileid/rkey，日志里只留主机名。 */
++function maskUrl(url) {
++	try {
++		return new URL(url).origin;
++	} catch {
++		return "（无效 URL）";
++	}
++}
++
+ function logChat(item) {
+ 	return `${item.kind}:${maskId(item.chatId)}`;
+ }
+@@ -91,7 +100,7 @@ export async function writeOverflowFile(body, cfg, log) {
+ }
+ 
+ export class QqBridge {
+-	constructor({ pi, api, config, log, notify, isOnline, onCommand, onFatal, injectTimeoutMs = 5000 }) {
++	constructor({ pi, api, config, log, notify, isOnline, onCommand, injectTimeoutMs = 5000 }) {
+ 		this.pi = pi;
+ 		this.api = api;
+ 		this.cfg = config;
+@@ -106,8 +115,8 @@ export class QqBridge {
+ 		this.pumping = false;
+ 		this.injecting = false;
+ 		this.injectTimeoutMs = injectTimeoutMs;
+-		this.onFatal = onFatal;
+-		this.staleReported = false;
++		this.stale = false;
++		this.retryCount = 0;
+ 		this.stopped = false;
+ 		this.seen = new Map();
+ 		this.lastByChat = new Map();
+@@ -125,14 +134,16 @@ export class QqBridge {
+ 		return {
+ 			queue: this.queue.length,
+ 			busy: this.running,
++			stale: this.stale,
+ 			inflight: this.inflight ? { chat: chatKey(this.inflight.item), texts: this.inflight.texts.length } : null,
+ 			stats: { ...this.stats },
+ 		};
+ 	}
+ 
+-	/** 换会话/重建时清空队列与进行中的状态。 */
++	/** 换会话/重建时清掉进行中的状态；排队消息由调用方（endSwitch）另行放回。 */
+ 	reset() {
+ 		this.generation++;
++		this.retryCount = 0;
+ 		this.#clearTimers();
+ 		this.#stopTyping(this.inflight);
+ 		this.queue = [];
+@@ -142,12 +153,31 @@ export class QqBridge {
+ 		this.injecting = false;
+ 	}
+ 
+-	/** 换会话开始：期间到达的消息先暂存，等 session_start 之后再放回队列。 */
++	/**
++	 * 新会话实例接棒：pi 每换会话都会重跑扩展工厂、换一个 pi 句柄，旧句柄随即作废。
++	 * 这里把旧句柄换掉；如果之前因为等不到接手而暂停，顺便解除暂停。
++	 */
++	adopt(pi) {
++		if (pi) this.pi = pi;
++		if (!this.stale) return;
++		this.stale = false;
++		this.retryCount = 0;
++		this.injecting = false;
++		this.log.info(`新会话实例已接管 QQ 桥，积压 ${this.queue.length} 条消息待处理`);
++	}
++
++	/**
++	 * 换会话开始：期间到达的消息先暂存，等 session_start 之后再放回队列。
++	 * 可重复调用（QQ 侧 /new 会先调一次，session_shutdown 再调一次）：
++	 * 已经在切换中时只续看门狗，绝不清空已暂存的消息。
++	 */
+ 	beginSwitch() {
+-		this.switching = true;
+-		this.deferred = [];
+-		// 兜底：Pi 没给 session_start（拒绝/报错/被打断）时不能一直暂存消息
++		if (!this.switching) {
++			this.switching = true;
++			this.deferred = [];
++		}
+ 		if (this.switchTimer) clearTimeout(this.switchTimer);
++		// 兜底：Pi 没给 session_start（拒绝/报错/被打断）时不能一直暂存消息
+ 		this.switchTimer = setTimeout(() => {
+ 			this.switchTimer = undefined;
+ 			if (!this.switching) return;
+@@ -164,18 +194,22 @@ export class QqBridge {
+ 		}
+ 	}
+ 
+-	/** 换会话结束（成功或失败）：清掉旧状态，把暂存的消息放回队列。 */
++	/**
++	 * 换会话完成：保留排队消息与暂存消息，丢掉属于旧会话的在途回答。
++	 * 已经注入旧会话的那条没办法重放（模型可能已经动过手），只记一条日志。
++	 */
+ 	endSwitch() {
+ 		this.#clearSwitchTimer();
+ 		const deferred = this.deferred;
++		const inflight = this.inflight;
++		const kept = this.queue;
+ 		this.deferred = [];
+ 		this.switching = false;
+ 		this.reset();
+-		if (deferred.length > 0) {
+-			this.queue.push(...deferred);
+-			this.log.info(`会话切换完成，恢复暂存的 ${deferred.length} 条消息`);
+-			void this.pump();
++		if (inflight) {
++			this.log.warn(`会话切换时有一条消息正在生成回答，该回答随旧会话丢弃（chat=${maskId(inflight.item.chatId)}）`);
+ 		}
++		this.#restore([...kept, ...deferred], "会话切换完成");
+ 	}
+ 
+ 	/** 换会话失败：解除暂存，把消息放回队列，别把队列一起清了。 */
+@@ -185,11 +219,53 @@ export class QqBridge {
+ 		const deferred = this.deferred;
+ 		this.deferred = [];
+ 		this.switching = false;
+-		if (deferred.length > 0) {
+-			this.queue.push(...deferred);
+-			this.log.info(`开新会话失败，放回暂存的 ${deferred.length} 条消息`);
++		this.#restore(deferred, "开新会话失败");
++	}
++
++	/**
++	 * 把暂存/排队过的消息放回桥里。
++	 * 斜杠命令在暂存期间没法执行（旧句柄已死），这里重新解析一遍交给命令通道，
++	 * 绝不当作普通提问喂给模型（AGENTS.md：斜杠命令不进模型）。
++	 */
++	#restore(items, label) {
++		if (items.length === 0) return;
++		const commands = [];
++		let queued = 0;
++		for (const item of items) {
++			const command = parseCommand(item.text);
++			if (command) {
++				commands.push({ item, command });
++				continue;
++			}
++			if (this.queue.length >= this.cfg.maxQueue) {
++				this.stats.ignored++;
++				this.log.warn(`队列已满（${this.cfg.maxQueue}），丢弃切换前排队的消息 ${maskId(item.msgId)}`);
++				continue;
++			}
++			this.queue.push(item);
++			queued++;
++		}
++		if (queued > 0) this.log.info(`${label}，恢复 ${queued} 条消息`);
++		if (commands.length === 0) {
+ 			void this.pump();
++			return;
+ 		}
++		// 命令按顺序补跑完再泵消息：否则 /model、/compact 可能落到刚注入的提问之后
++		this.log.info(`${label}，补跑 ${commands.length} 条命令`);
++		void (async () => {
++			for (let i = 0; i < commands.length; i++) {
++				if (this.stopped) return;
++				if (this.stale) {
++					// 接棒还没完成：把剩下的命令原样放回队首，等下一次恢复，别静默丢掉
++					const rest = commands.slice(i).map((entry) => entry.item);
++					this.queue.unshift(...rest);
++					this.log.warn(`桥已暂停，${rest.length} 条命令留到接棒后再跑`);
++					return;
++				}
++				await this.#runCommand(commands[i].item, commands[i].command);
++			}
++			void this.pump();
++		})();
+ 	}
+ 
+ 	/** 直接回一条纯文本（命令的答复），不走模型、不占队列。 */
+@@ -300,6 +376,11 @@ export class QqBridge {
+ 
+ 		// 正在切换会话：新消息留在暂存区，等 session_start 后放回队列，避免被 reset 清掉
+ 		if (this.switching) {
++			if (this.deferred.length >= this.cfg.maxQueue) {
++				this.stats.ignored++;
++				this.log.warn(`切换期间暂存已满（${this.cfg.maxQueue}），丢弃来自 ${logChat(item)} 的消息`);
++				return { accepted: false, reason: "暂存已满" };
++			}
+ 			this.deferred.push(item);
+ 			this.stats.received++;
+ 			this.log.info(`会话切换中，暂存消息 chat=${maskId(item.chatId)}（${this.deferred.length} 条）`);
+@@ -418,7 +499,7 @@ export class QqBridge {
+ 	}
+ 
+ 	async pump() {
+-		if (this.stopped || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
++		if (this.stopped || this.stale || this.switching || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
+ 		this.pumping = true;
+ 		try {
+ 			await this.#pumpOnce();
+@@ -453,15 +534,16 @@ export class QqBridge {
+ 		const downloaded = await Promise.all(
+ 			prompt.imageUrls.map(async (url) => {
+ 				const image = await downloadImage(url, this.cfg.images.maxBytes, mediaHeaders);
+-				if (!image) this.log.warn(`图片下载失败：${url.slice(0, 80)}`);
++				if (!image) this.log.warn(`图片下载失败：${maskUrl(url)}`);
+ 				return image;
+ 			}),
+ 		);
+ 		const images = downloaded.filter(Boolean);
+ 
+-		// 下载期间可能被 stop()、换会话或已经排了新消息
+-		if (this.stopped || generation !== this.generation) {
+-			if (generation === this.generation) this.queue.unshift(item);
++		// 下载期间可能被 stop()、换会话或已经排了新消息：放回队首，别把这条吞掉
++		if (this.stopped) return;
++		if (generation !== this.generation || this.switching || this.stale) {
++			this.queue.unshift(item);
+ 			return;
+ 		}
+ 
+@@ -477,20 +559,21 @@ export class QqBridge {
+ 		};
+ 		this.inflight = inflight;
+ 
+-		if (generation !== this.generation) return;
+ 		try {
+ 			const content = images.length > 0 ? [{ type: "text", text: prompt.text }, ...images] : prompt.text;
+ 			this.pi.sendUserMessage(content, item.expandTemplates ? { expandPromptTemplates: true } : undefined);
++			this.retryCount = 0;
+ 			this.log.info(`已注入 Pi（chat=${maskId(item.chatId)}，图片 ${images.length} 张）`);
+ 			// Pi 的 sendUserMessage 是 fire-and-forget，异步失败不会抛回来；靠看门狗兜底
+ 			this.#armInjectWatchdog(inflight);
+ 			this.#armAck(inflight);
+ 			this.#startTyping(inflight);
+ 		} catch (err) {
++			const inflight = this.inflight;
+ 			this.inflight = undefined;
+ 			if (isStaleContextError(err)) {
+ 				// 会话已被替换：旧 pi 句柄永久失效，重试多少次都不会成功
+-				this.#failOnStale(item, err);
++				this.#failOnStale(item, err, inflight);
+ 				return;
+ 			}
+ 			// 可能刚好在流式输出中：放回队首，等 agent_settled 或定时器再试
+@@ -502,42 +585,52 @@ export class QqBridge {
+ 	}
+ 
+ 	/**
+-	 * 会话被替换后旧 pi 句柄永久失效：一次性告警、回执 QQ、停桥并交上层收尾。
+-	 * 绝不能再走 #scheduleRetry：那条路径每 2 秒重试一次且没有上限。
++	 * 会话被替换：旧 pi 句柄永久失效。
++	 *
++	 * 不能每 2 秒重试（会无限刷），也不能把网关一起收掉——新会话实例很快就会通过
++	 * adopt() 接棒。所以这里只暂停：保留队列、网关和切换状态（switching/deferred 归
++	 * endSwitch/cancelSwitch 管），回一条提示，等新实例接手后自动继续。
+ 	 */
+-	#failOnStale(item, err) {
+-		if (this.staleReported) return;
+-		this.staleReported = true;
++	#failOnStale(item, err, inflight) {
+ 		const reason = err?.message ?? String(err);
+-		this.log.error(`会话已被替换，QQ 桥失效，停止桥接：${reason}`);
++		const first = !this.stale;
++		this.stale = true;
++		if (first) this.log.error(`会话已被替换，暂停注入直到新会话实例接棒：${reason}`);
++
++		// 丢掉在途轮次（回答属于旧会话，收不回来了），把消息还回去等接棒后重发
++		this.generation++;
++		this.#clearTimers();
++		this.#stopTyping(inflight ?? this.inflight);
++		this.inflight = undefined;
++		this.injecting = false;
++		if (item && !this.stopped) this.queue.unshift(item);
++
++		if (!first) return;
+ 		try {
+ 			const sending = this.api?.sendText?.(
+ 				replyTarget(item),
+-				"⚠️ Pi 会话已切换，这个 QQ 桥已失效。请在终端执行 /qq stop 再 /qq start 恢复。",
++				"⚠️ Pi 会话已切换，QQ 桥正在等新会话接棒；刚才这条会在接棒后自动重试。",
+ 				{ msgId: item.msgId, msgSeq: this.#nextSeq({ seqs: new Set(), attemptsLeft: 1 }) },
+ 			);
+ 			if (sending && typeof sending.catch === "function") {
+-				sending.catch((sendErr) => this.log.warn(`失效提示发送失败：${sendErr?.message ?? sendErr}`));
++				sending.catch((sendErr) => this.log.warn(`切换提示发送失败：${sendErr?.message ?? sendErr}`));
+ 			}
+ 		} catch {
+-			// 网关可能已经不可用，回执失败不影响停桥
+-		}
+-		this.notify("QQ 桥已随会话切换失效，已停止重试：请在终端 /qq stop 再 /qq start", "warning");
+-		this.stop();
+-		try {
+-			this.onFatal?.(err);
+-		} catch {
+-			// 上层收尾失败不影响已经停掉的桥
++			// 网关可能已经不可用，回执失败不影响接棒
+ 		}
++		this.notify("QQ 桥已暂停：Pi 会话被替换，等新会话接手后自动恢复", "warning");
+ 	}
+ 
+ 	#scheduleRetry() {
+ 		if (this.retryTimer || this.stopped) return;
++		// 退避：2s → 4s → 8s … 最多 30s。否则一条永久失败的消息会每 2 秒刷一次日志并堵住队列
++		this.retryCount = (this.retryCount ?? 0) + 1;
++		const delay = Math.min(2000 * 2 ** (this.retryCount - 1), 30_000);
+ 		this.retryTimer = setTimeout(() => {
+ 			this.retryTimer = undefined;
+ 			this.injecting = false;
+ 			void this.pump();
+-		}, 2000);
++		}, delay);
+ 		this.retryTimer.unref?.();
+ 	}
+ 
+diff --git a/test/e2e-service-cmd.mjs b/test/e2e-service-cmd.mjs
+index 163ca29..f64b2a6 100644
+--- a/test/e2e-service-cmd.mjs
++++ b/test/e2e-service-cmd.mjs
+@@ -14,6 +14,8 @@ import { startMockQq } from "./mock-qq.mjs";
+ 
+ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-svccmd-"));
++// 隔离的 Pi 配置目录，避免加载用户已安装的同名插件
++const agentDir = path.join(dir, "agent");
+ const configPath = path.join(dir, "config.json");
+ const sessionDir = path.join(dir, "sessions");
+ fs.mkdirSync(sessionDir, { recursive: true });
+@@ -37,7 +39,7 @@ fs.writeFileSync(
+ 
+ const child = spawn("pi", ["--mode", "rpc", "--session-dir", sessionDir, "--no-extensions", "--extension", root], {
+ 	cwd: dir,
+-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
++	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
+ 	stdio: ["pipe", "pipe", "pipe"],
+ });
+ let output = "";
+diff --git a/test/e2e-service.mjs b/test/e2e-service.mjs
+index efddf36..0549c8e 100644
+--- a/test/e2e-service.mjs
++++ b/test/e2e-service.mjs
+@@ -16,6 +16,8 @@ import { startMockQq } from "./mock-qq.mjs";
+ 
+ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-svc-"));
++// 隔离的 Pi 配置目录：否则会加载用户已 `pi install` 的同一插件，第二条网关连线把用例搅黄
++const agentDir = path.join(dir, "agent");
+ const configPath = path.join(dir, "config.json");
+ const sessionDir = path.join(dir, "sessions");
+ fs.mkdirSync(sessionDir, { recursive: true });
+@@ -39,7 +41,7 @@ fs.writeFileSync(
+ 
+ const child = spawn(process.execPath, [path.join(root, "bin", "pi-qq-connect.mjs"), "--cwd", dir, "--session-id", "pi-qq-e2e-service"], {
+ 	cwd: dir,
+-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
++	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
+ 	stdio: ["ignore", "pipe", "pipe"],
+ });
+ let output = "";
+@@ -79,7 +81,7 @@ if (state.pid !== child.pid) {
+ // 第二个服务实例应被拒绝
+ const second = spawn(process.execPath, [path.join(root, "bin", "pi-qq-connect.mjs"), "--cwd", dir, "--session-id", "dup"], {
+ 	cwd: dir,
+-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
++	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
+ 	stdio: ["ignore", "pipe", "pipe"],
+ });
+ const secondExit = await new Promise((resolve) => {
+diff --git a/test/e2e.mjs b/test/e2e.mjs
+index 791f970..b9f492d 100644
+--- a/test/e2e.mjs
++++ b/test/e2e.mjs
+@@ -57,7 +57,7 @@ child.stdout.on("data", () => {
+ 
+ function fail(message) {
+ 	console.error(`✖ ${message}`);
+-	if (stderr.trim()) console.error("--- pi stderr ---\n" + stderr.trim().slice(-3000));
++	if (stderr.trim()) console.error("--- pi stderr ---\n" + stderr.trim());
+ 	console.error(`--- 扩展日志 ---\n${safeLog()}`);
+ 	child.kill("SIGTERM");
+ 	void mock.stop().then(() => process.exit(1));
+@@ -65,7 +65,7 @@ function fail(message) {
+ 
+ function safeLog() {
+ 	try {
+-		return fs.readFileSync(logPath, "utf8").trim().slice(-3000) || "（空）";
++		return fs.readFileSync(logPath, "utf8").trim() || "（空）";
+ 	} catch {
+ 		return "（无日志）";
+ 	}
+@@ -100,16 +100,33 @@ try {
+ 	if (!(sent.body.msg_seq >= 1 && sent.body.msg_seq < 65536)) throw new Error(`msg_seq 不在 0..65535：${sent.body.msg_seq}`);
+ 	if (sent.type !== "private") throw new Error(`目标类型不对：${sent.type}`);
+ 
+-	// /qq new：QQ 里发命令，切到新 Pi 会话，网关不断，新会话还能继续聊
++	// /new：QQ 里发命令，切到新 Pi 会话，网关不断，命令保持可用，新会话还能继续聊
+ 	const identifiesBefore = mock.state.identifies.length;
+-	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-new-1", userOpenId: "e2e-user", content: "/qq new" }), "e2e-new-1");
+-	await until(() => mock.state.sends.some((s) => /已开新会话/.test(String(s.body.content ?? ""))), "新会话回执");
+-	console.log("✔ QQ 收到「已开新会话」回执");
++	const sendsBefore = mock.state.sends.length;
++	const newStartedAt = Date.now();
++	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-new-1", userOpenId: "e2e-user", content: "/new" }), "e2e-new-1");
++	await until(
++		() => mock.state.sends.slice(sendsBefore).some((s) => /已开新会话/.test(String(s.body.content ?? ""))),
++		"新会话回执",
++	);
++	const switchMs = Date.now() - newStartedAt;
++	// 回执来自 ctx.newSession() 的 resolve，是性能冒烟值，不作为回归门槛；
++	// 真正的门槛是后面「新会话里继续对话」「/qq status 仍可用」「日志无 30 秒看门狗」
++	console.log(`✔ QQ 收到「已开新会话」回执（${switchMs}ms）`);
+ 
+ 	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-msg-2", userOpenId: "e2e-user", content: "请只回复：pong2" }), "e2e-msg-2");
+ 	await until(() => mock.state.sends.some((s) => /pong2/i.test(String(s.body.content ?? ""))), "新会话里继续对话");
+ 	console.log("✔ 新会话里继续对话成功");
+-	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/qq new 期间网关被重连了");
++	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/new 期间网关被重连了");
++
++	// 换会话后命令必须仍然可用（扩展实例被重新注册），且不能再报「桥已失效」
++	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-status-1", userOpenId: "e2e-user", content: "/qq status" }), "e2e-status-1");
++	await until(() => mock.state.sends.some((s) => /网关：/.test(String(s.body.content ?? ""))), "换会话后 /qq status 仍可用");
++	console.log("✔ 换会话后 /qq status 仍可用");
++	const logText = safeLog();
++	if (/stale after session replacement/i.test(logText)) throw new Error("换会话后出现 stale 报错");
++	if (/换会话 30 秒内没有完成/.test(logText)) throw new Error("换会话没收到 session_start，走了 30 秒看门狗");
++	if (/QQ 桥已暂停/.test(logText)) throw new Error("换会话后桥被误判失效");
+ 
+ 	const sessionFiles = fs.readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
+ 	if (sessionFiles.length < 2) throw new Error(`新会话没有落盘，只有 ${sessionFiles.length} 个 session 文件`);
+diff --git a/test/harness.mjs b/test/harness.mjs
+index b604eae..120a132 100644
+--- a/test/harness.mjs
++++ b/test/harness.mjs
+@@ -10,6 +10,7 @@ export function createFakePi() {
+ 	const handlers = new Map();
+ 	const sent = [];
+ 	const commands = new Map();
++	const commandRegistrations = [];
+ 	const pi = {
+ 		streaming: false,
+ 		on(name, fn) {
+@@ -22,6 +23,7 @@ export function createFakePi() {
+ 			};
+ 		},
+ 		registerCommand(name, options) {
++			commandRegistrations.push(name);
+ 			commands.set(name, options);
+ 		},
+ 		sendUserMessage(content, options) {
+@@ -43,6 +45,7 @@ export function createFakePi() {
+ 		pi,
+ 		sent,
+ 		commands,
++		commandRegistrations,
+ 		async emit(name, payload, ctx) {
+ 			for (const fn of handlers.get(name) ?? []) await fn(payload, ctx);
+ 		},
+diff --git a/test/session-adopt.test.mjs b/test/session-adopt.test.mjs
+new file mode 100644
+index 0000000..32ebb84
+--- /dev/null
++++ b/test/session-adopt.test.mjs
+@@ -0,0 +1,377 @@
++/**
++ * 会话实例接棒回归测试（不连 QQ 网关、不碰真实会话）。
++ *
++ * pi 1.4 的会话替换时序：
++ *   I1 收到 session_shutdown(new) → I1 的 pi 句柄作废
++ *   → 扩展工厂重跑得到 I2 → I2 收到 session_start(new) → I1 的 withSession 才执行
++ *
++ * 这里验证插件按实例注册事件/命令，并且新旧实例能通过进程级单例把桥交接过去。
++ */
++
++import assert from "node:assert/strict";
++import path from "node:path";
++import test from "node:test";
++
++import { DEFAULT_CONFIG } from "../src/config.js";
++import { QqBridge } from "../src/session.js";
++import { createFakePi, sleep, tempConfigPath, waitFor, writeConfig } from "./harness.mjs";
++
++const cfgFile = tempConfigPath();
++writeConfig(cfgFile, {
++	enabled: false,
++	appId: "1234567890",
++	clientSecret: "test-secret",
++	allowAll: true,
++	log: { file: path.join(path.dirname(cfgFile), "test.log"), level: "info" },
++});
++process.env.PIQQCONNECT_CONFIG = cfgFile;
++
++const mod = await import("../src/index.js");
++const { resetRuntimeForTests } = mod;
++
++function fakeCtx() {
++	return {
++		cwd: path.dirname(cfgFile),
++		ui: { notify() {}, setStatus() {} },
++	};
++}
++
++/** 只实现 index.js 会用到的几件事，方便断言交接顺序。 */
++function trackingBridge(pi) {
++	const calls = [];
++	return {
++		calls,
++		pi,
++		switching: false,
++		stale: false,
++		adopt(next) {
++			calls.push("adopt");
++			this.pi = next;
++		},
++		beginSwitch() {
++			calls.push("beginSwitch");
++			this.switching = true;
++		},
++		endSwitch() {
++			calls.push("endSwitch");
++			this.switching = false;
++		},
++		pump() {
++			calls.push("pump");
++		},
++		stop() {
++			calls.push("stop");
++		},
++	};
++}
++
++const silentLog = { debug() {}, info() {}, warn() {}, error() {}, tail: () => [] };
++
++/** 真 QqBridge + 假 api/pi，用来验证切换收尾时的队列语义。 */
++function makeBridge({ onCommand } = {}) {
++	const injected = [];
++	const sends = [];
++	const config = {
++		...DEFAULT_CONFIG,
++		allowAll: true,
++		typing: false,
++		ackAfterMs: 0,
++		images: { ...DEFAULT_CONFIG.images, enabled: false },
++	};
++	const bridge = new QqBridge({
++		pi: {
++			sendUserMessage(content) {
++				injected.push(content);
++			},
++		},
++		api: {
++			auth: { getToken: async () => "t" },
++			sendText: async (target, content) => {
++				sends.push({ target, content: String(content) });
++			},
++		},
++		config,
++		log: silentLog,
++		notify: () => {},
++		isOnline: () => true,
++		onCommand,
++		injectTimeoutMs: 0,
++	});
++	return { bridge, injected, sends };
++}
++
++function item(id, text = "hello") {
++	return { kind: "private", chatId: "chat-1", userId: "user-1", msgId: id, text, receivedAt: Date.now(), attachments: [] };
++}
++
++test("T1 同一个 pi 对象重复加载只注册一次", async (t) => {
++	resetRuntimeForTests();
++	const fake = createFakePi();
++	mod.default(fake.pi);
++	const registrations = fake.commandRegistrations.length;
++	const starts = fake.handlerCount("session_start");
++	const shutdowns = fake.handlerCount("session_shutdown");
++
++	mod.default(fake.pi); // 自动发现 + 显式 --extension 命中同一路径
++
++	await t.test("命令没有被重复注册", () => assert.equal(fake.commandRegistrations.length, registrations));
++	await t.test("事件监听没有被重复注册", () => {
++		assert.equal(fake.handlerCount("session_start"), starts);
++		assert.equal(fake.handlerCount("session_shutdown"), shutdowns);
++	});
++});
++
++test("T2 新会话实例重新注册命令与事件", async (t) => {
++	resetRuntimeForTests();
++	const first = createFakePi();
++	mod.default(first.pi);
++	await first.emit("session_start", { reason: "startup" }, fakeCtx());
++
++	const second = createFakePi();
++	const state = mod.default(second.pi);
++	await second.emit("session_start", { reason: "new" }, fakeCtx());
++
++	await t.test("新实例注册了 /qq 命令", () => assert.ok(second.commands.has("qq")));
++	await t.test("新实例注册了事件监听", () => {
++		assert.ok(second.handlerCount("session_start") > 0);
++		assert.ok(second.handlerCount("session_shutdown") > 0);
++		assert.ok(second.handlerCount("message_end") > 0);
++	});
++	await t.test("state.extensionApi 指向最新句柄", () => assert.equal(state.extensionApi, second.pi));
++	await t.test("state.ctx 指向新会话上下文", () => assert.equal(state.ctx.cwd, path.dirname(cfgFile)));
++});
++
++test("T2b 同一会话里两个 pi 对象只让一个实例处理事件", async (t) => {
++	resetRuntimeForTests();
++	const first = createFakePi();
++	const state = mod.default(first.pi);
++	const second = createFakePi();
++	mod.default(second.pi); // 另一个对象，同一个会话
++
++	const shared = fakeCtx();
++	await first.emit("session_start", { reason: "startup" }, shared);
++	await second.emit("session_start", { reason: "startup" }, shared);
++
++	await t.test("事件只绑定到被选中的那个实例", () => {
++		assert.ok(state.owner === first.pi || state.owner === second.pi);
++	});
++	const ownerFake = state.owner === first.pi ? first : second;
++	const otherFake = ownerFake === first ? second : first;
++	const events = [];
++	state.bridge = { onMessageEnd: () => events.push("hit"), pi: null, adopt() {}, pump() {}, stop() {} };
++	await otherFake.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "x" }] } }, shared);
++	await t.test("非负责人实例的回调被忽略", () => assert.equal(events.length, 0));
++	await ownerFake.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "x" }] } }, shared);
++	await t.test("负责人实例的回调生效", () => assert.equal(events.length, 1));
++	state.bridge = undefined;
++});
++
++test("T3 换会话时暂停注入，新实例接棒后收尾", async (t) => {
++	resetRuntimeForTests();
++	const first = createFakePi();
++	const state = mod.default(first.pi);
++	await first.emit("session_start", { reason: "startup" }, fakeCtx());
++
++	const bridge = trackingBridge(first.pi);
++	state.bridge = bridge;
++
++	await first.emit("session_shutdown", { reason: "new" });
++	await t.test("旧实例退出时只暂停，不拆网关", () => {
++		assert.deepEqual(bridge.calls, ["beginSwitch"]);
++		assert.equal(bridge.switching, true);
++	});
++
++	const second = createFakePi();
++	mod.default(second.pi);
++	await t.test("工厂一跑就把桥指向新句柄", () => assert.equal(bridge.pi, second.pi));
++
++	await second.emit("session_start", { reason: "new" }, fakeCtx());
++	await t.test("新实例接棒并结束切换", () => {
++		assert.equal(bridge.calls.at(-1), "endSwitch");
++		assert.equal(bridge.switching, false);
++	});
++
++	state.bridge = undefined;
++});
++
++test("T4 /reload 也走同一条接棒路径", async (t) => {
++	resetRuntimeForTests();
++	const first = createFakePi();
++	const state = mod.default(first.pi);
++	await first.emit("session_start", { reason: "startup" }, fakeCtx());
++
++	const bridge = trackingBridge(first.pi);
++	state.bridge = bridge;
++
++	await first.emit("session_shutdown", { reason: "reload" });
++	await t.test("reload 时暂停注入", () => assert.equal(bridge.switching, true));
++
++	const second = createFakePi();
++	mod.default(second.pi);
++	await second.emit("session_start", { reason: "reload" }, fakeCtx());
++	await t.test("reload 后接棒结束切换", () => {
++		assert.equal(bridge.calls.at(-1), "endSwitch");
++		assert.equal(bridge.switching, false);
++	});
++	state.bridge = undefined;
++});
++
++test("T5 /fork 走同一条接棒路径", async (t) => {
++	resetRuntimeForTests();
++	const first = createFakePi();
++	const state = mod.default(first.pi);
++	await first.emit("session_start", { reason: "startup" }, fakeCtx());
++	const bridge = trackingBridge(first.pi);
++	state.bridge = bridge;
++
++	await first.emit("session_shutdown", { reason: "fork" });
++	assert.equal(bridge.switching, true);
++	const second = createFakePi();
++	mod.default(second.pi);
++	await second.emit("session_start", { reason: "fork" }, fakeCtx());
++	await t.test("fork 后接棒结束切换", () => {
++		assert.equal(bridge.calls.at(-1), "endSwitch");
++		assert.equal(bridge.switching, false);
++	});
++	state.bridge = undefined;
++});
++
++test("T6 未知 shutdown reason 不拆网关，按换会话处理", async (t) => {
++	resetRuntimeForTests();
++	const fake = createFakePi();
++	const state = mod.default(fake.pi);
++	await fake.emit("session_start", { reason: "startup" }, fakeCtx());
++	const bridge = trackingBridge(fake.pi);
++	state.bridge = bridge;
++
++	await fake.emit("session_shutdown", { reason: "switch" });
++	await t.test("未知 reason 只暂停", () => {
++		assert.deepEqual(bridge.calls, ["beginSwitch"]);
++		assert.equal(bridge.calls.includes("stop"), false);
++	});
++	state.bridge = undefined;
++});
++
++test("T7 退出（quit）时照常收摊", async (t) => {
++	resetRuntimeForTests();
++	const fake = createFakePi();
++	const state = mod.default(fake.pi);
++	await fake.emit("session_start", { reason: "startup" }, fakeCtx());
++	const bridge = trackingBridge(fake.pi);
++	state.bridge = bridge;
++
++	await fake.emit("session_shutdown", { reason: "quit" });
++	await t.test("quit 时停桥并释放状态", () => {
++		assert.ok(bridge.calls.includes("stop"));
++		assert.equal(state.bridge, undefined);
++		assert.equal(state.gateway, undefined);
++	});
++});
++
++test("T8 beginSwitch 可重复调用，暂存的消息不丢", async () => {
++	const { bridge, injected } = makeBridge();
++	bridge.beginSwitch();
++	bridge.enqueue(item("m1"));
++	bridge.enqueue(item("m2"));
++	bridge.beginSwitch(); // session_shutdown 又来一次
++	assert.equal(bridge.deferred.length, 2, "重复 beginSwitch 不能清空暂存");
++	bridge.endSwitch();
++	await waitFor(() => injected.length === 1, { label: "接棒后先注入第一条" });
++	assert.equal(bridge.queue.length, 1, "第二条仍在队列里");
++	assert.equal(bridge.stopped, false);
++	bridge.stop();
++});
++
++test("T9 endSwitch 保留排队消息，丢掉旧会话的在途回答", async (t) => {
++	const { bridge, injected } = makeBridge();
++	bridge.enqueue(item("m1")); // 立刻注入，成为 inflight
++	await waitFor(() => bridge.inflight?.item.msgId === "m1", { label: "第一条进入在途" });
++	bridge.enqueue(item("m2")); // 排队
++	assert.equal(bridge.queue.length, 1);
++
++	bridge.beginSwitch();
++	bridge.enqueue(item("m3")); // 暂存
++	assert.equal(bridge.deferred.length, 1);
++
++	bridge.endSwitch();
++	await waitFor(() => injected.length >= 2, { label: "接棒后继续注入排队消息" });
++	await t.test("旧会话的在途消息不会被重放（回答已丢弃）", () => assert.equal(injected.length, 2));
++	await t.test("排队与暂存的消息都还在，顺序不变", () => {
++		assert.equal(bridge.inflight?.item.msgId, "m2");
++		assert.deepEqual(
++			bridge.queue.map((i) => i.msgId),
++			["m3"],
++		);
++	});
++	bridge.stop();
++});
++
++test("T10 切换期间到达的斜杠命令不会被当提问喂模型", async () => {
++	const handled = [];
++	const { bridge, injected } = makeBridge({ onCommand: (command) => (handled.push(command), { text: "ok" }) });
++	bridge.beginSwitch();
++	bridge.enqueue(item("c1", "/help"));
++	assert.equal(bridge.deferred.length, 1);
++	bridge.endSwitch();
++	await waitFor(() => handled.length === 1, { label: "切换后补跑命令" });
++	assert.deepEqual(
++		handled.map((c) => c.name),
++		["help"],
++		"切换后应重新走命令通道",
++	);
++	assert.equal(injected.length, 0, "命令不能进模型");
++	assert.equal(bridge.queue.length, 0);
++	bridge.stop();
++});
++
++test("T11 切换期间 pump 不注入", async () => {
++	const { bridge, injected } = makeBridge();
++	bridge.beginSwitch();
++	bridge.queue.push(item("m1"));
++	await bridge.pump();
++	assert.equal(injected.length, 0, "切换中不允许注入");
++	bridge.cancelSwitch();
++	bridge.stop();
++});
++
++test("T12 开新会话失败（cancelSwitch）时命令照样补跑，不进模型", async () => {
++	const handled = [];
++	const { bridge, injected } = makeBridge({ onCommand: (command) => (handled.push(command), { text: "ok" }) });
++	bridge.beginSwitch();
++	bridge.enqueue(item("c1", "/help"));
++	bridge.cancelSwitch();
++	await waitFor(() => handled.length === 1, { label: "取消切换后补跑命令" });
++	assert.equal(injected.length, 0, "命令不能进模型");
++	assert.equal(bridge.switching, false);
++	bridge.stop();
++});
++
++test("T13 切换期间暂存受队列上限约束，超限丢弃并计数", async () => {
++	const { bridge } = makeBridge();
++	bridge.beginSwitch();
++	for (let i = 0; i < bridge.cfg.maxQueue; i++) bridge.enqueue(item(`q${i}`));
++	const overflow = bridge.enqueue(item("overflow"));
++	assert.equal(overflow.accepted, false);
++	assert.equal(overflow.reason, "暂存已满");
++	assert.equal(bridge.deferred.length, bridge.cfg.maxQueue);
++	bridge.endSwitch();
++	bridge.stop();
++});
++
++test("T14 同一会话重复加载时命令只注册一次", async (t) => {
++	resetRuntimeForTests();
++	const first = createFakePi();
++	mod.default(first.pi);
++	const second = createFakePi();
++	mod.default(second.pi);
++	const shared = fakeCtx();
++	await first.emit("session_start", { reason: "startup" }, shared);
++	await second.emit("session_start", { reason: "startup" }, shared);
++	const count = () =>
++		first.commandRegistrations.filter((n) => n === "qq").length + second.commandRegistrations.filter((n) => n === "qq").length;
++	await t.test("同一会话只注册一次 /qq", () => assert.equal(count(), 1, "同名命令重复注册会让命令彻底失效"));
++	await t.test("重复的 session_start 不会重复注册", async () => {
++		await first.emit("session_start", { reason: "startup" }, shared);
++		assert.equal(count(), 1);
++	});
++});
+diff --git a/test/stale-session.test.mjs b/test/stale-session.test.mjs
+index 588eb7e..64f27fe 100644
+--- a/test/stale-session.test.mjs
++++ b/test/stale-session.test.mjs
+@@ -2,7 +2,7 @@
+  * 会话切换回归测试（不连 QQ 网关、不碰真实会话）。
+  *
+  *   P0 isStaleContextError 只认 pi 的 stale 文案
+- *   P1 stale 注入 → 停桥 + 一次性告警 + onFatal，不再每 2 秒无限重试
++ *   P1 stale 注入 → 暂停注入（不停桥、不无限重试），新实例接手后自动恢复
+  *   P2 session_start(new|resume|fork) 且没有活动桥 → 重建（自愈）
+  *   P3 switchSession 按 pi 文档传 withSession
+  */
+@@ -56,49 +56,68 @@ test("P0 isStaleContextError 识别", async (t) => {
+ 	});
+ });
+ 
+-test("P1 stale 注入不再无限重试", async (t) => {
++test("P1 stale 注入只暂停，接棒后恢复", async (t) => {
+ 	const logs = [];
+ 	const notes = [];
+-	let fatal = 0;
++	const sends = [];
++	let attempts = 0;
++	const stalePi = {
++		sendUserMessage() {
++			attempts++;
++			throw new Error(STALE);
++		},
++	};
+ 	const bridge = new QqBridge({
+-		pi: {
+-			sendUserMessage() {
+-				throw new Error(STALE);
++		pi: stalePi,
++		api: {
++			sendText: async (target, content) => {
++				sends.push({ target, content });
+ 			},
+ 		},
+-		api: { sendText: () => ({}) },
+ 		config: makeCfg(),
+ 		log: makeLog(logs),
+ 		notify: (message) => notes.push(message),
+ 		isOnline: () => true,
+ 		onNewSession: () => {},
+-		onFatal: (err) => {
+-			fatal++;
+-			assert.equal(isStaleContextError(err), true);
+-		},
+ 		injectTimeoutMs: 0,
+ 	});
+ 	bridge.enqueue(makeItem());
+-	await sleep(300);
++	await waitFor(() => bridge.stale === true, { label: "进入 stale 状态" });
+ 
+-	await t.test("桥已停止", () => assert.equal(bridge.stopped, true));
+-	await t.test("没有残留重试定时器", () => {
++	await t.test("桥没有自毁（网关仍在）", () => assert.equal(bridge.stopped, false));
++	await t.test("标记 stale 并停止重试", () => {
++		assert.equal(bridge.stale, true);
+ 		assert.equal(bridge.retryTimer, undefined);
+ 		assert.equal(bridge.injectTimer, undefined);
++		assert.equal(attempts, 1, "stale 后不应再重试注入");
+ 	});
+-	await t.test("队列清空、无 inflight", () => {
+-		assert.equal(bridge.queue.length, 0);
++	await t.test("没处理的消息留在队列里等接棒", () => {
+ 		assert.equal(bridge.inflight, undefined);
++		assert.equal(bridge.queue.length, 1);
+ 	});
+-	await t.test("onFatal 只调用一次", () => assert.equal(fatal, 1));
+ 	await t.test("stale 只记一次 error，不再打「等空闲后重试」", () => {
+ 		const staleLines = logs.filter((l) => /stale after session replacement/i.test(l.message));
+ 		assert.equal(staleLines.length, 1, `stale 记录 ${staleLines.length} 条`);
+ 		assert.equal(logs.filter((l) => l.message.includes("等空闲后重试")).length, 0);
+ 	});
+-	await t.test("给 QQ 的提示带 /qq stop", () => {
+-		assert.ok(notes.some((n) => n.includes("/qq stop")), "缺少 /qq stop 提示");
++	await t.test("提示不再要求用户手动 /qq stop", () => {
++		assert.ok(notes.some((n) => n.includes("自动恢复")), "缺少自动恢复提示");
++		assert.ok(sends.some((s) => String(s.content).includes("接棒")), "缺少给 QQ 的提示");
+ 	});
++
++	await t.test("新实例接手后自动恢复（走生产路径 adopt + endSwitch）", async () => {
++		const injected = [];
++		bridge.adopt({
++			sendUserMessage(content) {
++				injected.push(content);
++			},
++		});
++		assert.equal(bridge.stale, false);
++		bridge.endSwitch();
++		await waitFor(() => injected.length >= 1, { label: "接棒后重新注入积压消息" });
++		assert.equal(bridge.queue.length, 0, "积压消息应被处理完");
++	});
++	bridge.stop();
+ });
+ 
+ test("P1 非 stale 错误仍保留原有重试行为（防回归）", async (t) => {
+@@ -180,18 +199,29 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
+ 	await t.test("state.ctx 指向新会话上下文", () => assert.equal(state.ctx, firstCtx));
+ 
+ 	let ended = 0;
+-	let reset = 0;
++	let adopted = 0;
+ 	state.bridge = {
+ 		pi: null,
+-		endSwitch: () => {
++		switching: false,
++		adopt(pi) {
++			adopted++;
++			this.pi = pi;
++		},
++		endSwitch() {
+ 			ended++;
++			this.switching = false;
+ 		},
+-		reset: () => {
+-			reset++;
++		beginSwitch() {
++			this.switching = true;
+ 		},
++		pump() {},
++		reset() {},
+ 	};
+ 	const secondCtx = makeCtx();
+ 	const before = notifications.length;
++	// 真实时序：先 session_shutdown（暂停注入），再 session_start（接棒收尾）
++	await fake.emit("session_shutdown", { reason: "new" });
++	await t.test("shutdown 时进入切换态", () => assert.equal(state.bridge.switching, true));
+ 	await fake.emit("session_start", { reason: "new" }, secondCtx);
+ 	await sleep(120);
+ 
+@@ -201,11 +231,18 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
+ 	});
+ 	await t.test("有桥时刷新 bridge.pi", () => assert.equal(state.bridge.pi, fake.pi));
+ 
++	await fake.emit("session_shutdown", { reason: "resume" });
+ 	await fake.emit("session_start", { reason: "resume" }, makeCtx());
+-	await t.test("resume 时重置队列", () => {
+-		assert.equal(reset, 1);
++	await t.test("resume 同样接棒并结束切换", () => {
++		assert.equal(adopted, 2);
++		assert.equal(ended, 2);
+ 		assert.equal(state.ctx, nextCtx);
+ 	});
++
++	// 没有经历 beginSwitch 的 session_start（例如 reload 后重放）不能重置健康会话
++	const endedBefore = ended;
++	await fake.emit("session_start", { reason: "startup" }, makeCtx());
++	await t.test("无切换态时不调 endSwitch", () => assert.equal(ended, endedBefore));
+ 	state.bridge = undefined;
+ });
+ 
+diff --git a/test/unit.test.mjs b/test/unit.test.mjs
+index ef17ba5..99644b3 100644
+--- a/test/unit.test.mjs
++++ b/test/unit.test.mjs
+@@ -369,7 +369,7 @@ test("桥：/qq new 只回改名提示，不再切会话", async () => {
+ 	assert.equal(fake.sent.length, 0);
+ });
+ 
+-test("桥：换会话后旧队列作废", async () => {
++test("桥：reset() 清队列与在途（endSwitch 保留队列，见 session-adopt T9）", async () => {
+ 	const fake = createFakePi();
+ 	const api = stubApi();
+ 	const bridge = new QqBridge({ pi: fake.pi, api, config: normalizeConfig({ allowAll: true }), log: silentLog });

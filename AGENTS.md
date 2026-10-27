@@ -27,6 +27,8 @@
 | `bin/pi-qq-connect.mjs` | 常驻启动器：拉起 `pi --mode rpc` 并保活，排空 stdout、自动应答扩展对话框；`--dry-run` 打印参数 |
 | `test/mock-qq.mjs` | 本地假 QQ 平台（HTTP + 最小 WebSocket 服务端） |
 | `test/unit.test.mjs` | 单测 + mock 集成（默认测试入口） |
+| `test/session-adopt.test.mjs` | 会话接棒：事件/命令按实例注册、adopt/endSwitch、stale 恢复、队列语义 |
+| `test/dual-load.test.mjs` | 同一插件被加载两份时：只一个负责人、`/qq` 只回一次 |
 | `test/media.test.mjs` | 文件标记、路径校验、分片上传、媒体发送 |
 | `docs/` | 架构、开发流程、决策记录 |
 | `examples/config.json` | 配置样例 |
@@ -37,8 +39,8 @@
 ## 命令
 
 ```bash
-npm test                  # node --test test/：131 项，单测 + mock 平台集成，十来秒
-npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
+npm test                  # node --test test/：148 项，单测 + mock 平台集成，十来秒
+npm run e2e               # 真 pi --mode rpc + mock QQ，会调两次模型
 npm run e2e:service       # 后台服务进程，不调模型
 npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop，不调模型
 node bin/pi-qq-connect.mjs --dry-run   # 打印真正会执行的 pi 参数（排查插件没加载）
@@ -80,12 +82,13 @@ systemctl --user restart pi-qq-connect.service          # ExecStart 指向本目
 5. **协议事实以 `docs/PLAN.md` 为准**：intents `1<<25`、被动回复窗口（群 5min / 单聊 60min）、
    单聊每条最多 4 次 / 群 5 次、`msg_id+msg_seq` 去重、媒体 CDN 要带 `Authorization: QQBot <token>`，
    否则 403。改这些之前先补测试。
-6. **QQ 侧 `/qq new` 的实现方式不能换**：必须走
-   `pi.sendUserMessage("/qq new", { expandPromptTemplates: true })` 让 Pi 派发扩展命令，
-   handler 里 `ctx.newSession()`。不要缓存旧 `ctx` 直接调——`newSession` 返回后旧 ctx 立刻失效。
+6. **QQ 侧 `/new` 的实现方式不能换**：必须走内部命令
+   `pi.sendUserMessage("/qq __new", { expandPromptTemplates: true })` 让 Pi 派发扩展命令，
+   handler 里 `ctx.newSession()`（`/qq new` 只是 QQ 侧的改名提示，不再切会话）。
+   不要缓存旧 `ctx` 直接调——`newSession` 返回后旧 ctx 与旧 `pi` 句柄都立刻失效。
 7. **换会话会重跑扩展工厂**：网关、队列、锁状态必须存在 `globalThis[Symbol.for(...)]` 单例里，
    否则 `/new` 之后会多连一条网关、多抢一次锁。
-8. **测试不连真 QQ**：全部用 `test/mock-qq.mjs`。`npm run e2e` 会花一次模型调用，别在循环里跑。
+8. **测试不连真 QQ**：全部用 `test/mock-qq.mjs`。`npm run e2e` 会花两次模型调用，别在循环里跑。
 
 ## 常见改动入口
 
@@ -100,7 +103,7 @@ systemctl --user restart pi-qq-connect.service          # ExecStart 指向本目
 
 ## 完成标准
 
-- `npm test` 全过（当前 131 项），无挂起、无未捕获 rejection。
+- `npm test` 全过（当前 148 项），无挂起、无未捕获 rejection。
 - 触及协议/网关/发送/会话切换时：`npm run e2e` 通过（pong → `/new` → 新会话继续对话）。
 - 触及服务模式时：`npm run e2e:service` 与 `e2e:service-cmd` 通过。
 - `./scripts/publish-to-core.sh` 预览里的差异与本次改动一致，没有意外删除。

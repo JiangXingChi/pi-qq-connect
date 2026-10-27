@@ -209,7 +209,8 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 { "extensions": ["npm:pi-hermes-memory", "npm:pi-web-access", "builtin:tool-search"] }
 ```
 
-- 本插件永远只加载一份：入口用 `Symbol.for` 幂等守卫，自动发现与显式 `--extension` 同时命中时只注册一次。
+- 本插件被自动发现与显式 `--extension` 同时命中时：同一个 `pi` 对象只注册一次（`WeakSet`）；
+  如果 pi 给了两个不同的对象，就按 `session_start` 的同一个 `ctx` 选举一个负责人，事件和命令都只走它。
 - `"none"` 是隔离模式（QQ 里只有本插件的能力）；数组是白名单，`builtin:` 原样透传。
 - 代价：加载得越多，每轮系统提示越长，QQ 每条消息越费 token。只想聊天就设 `"none"`。
 - 改了这项要重启后台服务才生效（`/qq stop` 再 `/qq start`，或 `systemctl --user restart`）。

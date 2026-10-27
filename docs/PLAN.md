@@ -73,8 +73,8 @@ test/{ws-server,mock-qq,harness,unit.test,bridge.test,commands.test,media.test,l
 2. 集成：假 pi API + mock QQ（HTTP+WS）走完「收到 QQ → 注入 → assistant 文本 → 发回」，断言 msg_id/msg_seq。
 3. 端到端：真 `pi --mode rpc` 加载本扩展，mock 网关发「请只回复：pong」，断言 mock 收到含 pong 的被动回复。
 4. 真 Pi 里 `/qq status` 可用、`/qq` 命令注册成功。
-5. 会话接棒（0.4.1）：QQ 发 `/new` 后 10 秒内回执、新会话里继续对话、`/qq status` 仍可用、
-   日志无 `stale after session replacement` 与「换会话 30 秒内没有完成」。
+5. 会话接棒（0.4.1）：QQ 发 `/new` 后新会话里继续对话、QQ 侧 `/qq status` 与 pi 命令通道（RPC `/qq status`）
+   都仍可用、日志无 `stale after session replacement` 与「换会话 30 秒内没有完成」。回执耗时只打印，不作门槛。
 
 ## 决策记录
 

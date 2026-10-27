@@ -124,7 +124,7 @@ function isSelf(name, pkgPath) {
  * - 数组：`--no-extensions` + 逐个 `--extension`，`builtin:xxx` 原样透传。
  *
  * 自身永远用显式 `--extension <root>` 加载（没装进 settings 也能跑）；自动发现再加载
- * 一份也没关系，入口有 Symbol.for 幂等守卫，只会注册一次。
+ * 一份也没关系：入口按实例注册事件，并在会话内选举一个负责人，命令只注册一次。
  */
 function extensionFlags(config) {
 	const policy = config?.extensions ?? "auto";

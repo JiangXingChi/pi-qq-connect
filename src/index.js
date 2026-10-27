@@ -36,6 +36,14 @@ function baseDir() {
 	return path.dirname(configPath());
 }
 
+/**
+ * 开新会话失败时该不该立刻取消切换。
+ * 只有「确实没开始换会话」才取消；已经收到 session_shutdown 的，交给端侧接棒与看门狗。
+ */
+export function shouldCancelSwitch({ ok, owner, sawShutdown }) {
+	return !ok && owner && !sawShutdown;
+}
+
 /** AppID 是 9~10 位数字，maskId 对短 ID 不掩码，这里单独处理。 */
 function maskAppId(id) {
 	const text = String(id ?? "");
@@ -74,6 +82,7 @@ function newRuntime() {
 		starting: false,
 		startPending: undefined,
 		owner: undefined,
+		ownerStale: false,
 		sessionCtx: undefined,
 		lastInbound: undefined,
 		lockWatch: undefined,
@@ -183,7 +192,7 @@ export default function createExtension(pi) {
 		} catch (err) {
 			if (isStaleContextError(err)) {
 				// 旧句柄已失效：新会话其实已经开成，出问题的是桥
-				return { ok: false, message: "当前 pi 会话句柄已作废，请 /qq stop 再 /qq start 重启后台服务" };
+				return { ok: false, message: "这个会话已经被另一次切换替换了，QQ 桥会在新会话里自动接棒" };
 			}
 			return { ok: false, message: err?.message ?? String(err) };
 		}
@@ -210,11 +219,13 @@ export default function createExtension(pi) {
 				if (owner) state.pendingExec = undefined;
 				// 失败/取消：如果这次确实已经开始换会话（见过 session_shutdown），就交给看门狗与接棒；
 				// 纯失败（被取消、报错、超时且根本没换）必须立刻把暂存队列放回去，别让整桥停 30 秒
-				if (!result?.ok && owner && !pending?.sawShutdown) state.bridge?.cancelSwitch();
+				if (shouldCancelSwitch({ ok: Boolean(result?.ok), owner, sawShutdown: pending?.sawShutdown })) {
+					state.bridge?.cancelSwitch();
+				}
 				resolve(result);
 			};
-			// 略长于 session.js 的 30 秒切换看门狗：看门狗先恢复队列，这里再清掉 pendingExec，
-			// 免得用户在 31~60 秒之间发 /new 还被「上一个还在进行中」挡住
+			// 略长于 session.js 的 30 秒切换看门狗：看门狗先恢复队列，这里再清掉 pendingExec；
+			// 31~35 秒之间发 /new 仍会被「上一个还在进行中」挡住，可接受
 			const timer = setTimeout(() => done({ ok: false, message: "Pi 35 秒内没有完成会话切换（可能正忙）" }), 35_000);
 			timer.unref?.();
 			state.pendingExec = { done };
@@ -434,9 +445,16 @@ export default function createExtension(pi) {
 		lines.push(`锁：${lock ? `pid ${lock.pid}（${lock.at}）` : "无"}`);
 		if (state.bridge) {
 			const s = state.bridge.status;
-			const flags = [s.busy ? "Pi 忙" : "", s.stale ? "已暂停，等新会话接棒" : ""].filter(Boolean).join(" · ");
+			const flags = [
+				s.busy ? "Pi 忙" : "",
+				s.switching ? "切换中" : "",
+				s.stale ? "已暂停，等新会话接棒" : "",
+			]
+				.filter(Boolean)
+				.join(" · ");
+			const deferred = s.deferred ? ` · 暂存 ${s.deferred} 条` : "";
 			lines.push(
-				`队列：${s.queue} 条${flags ? ` · ${flags}` : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`,
+				`队列：${s.queue} 条${deferred}${flags ? ` · ${flags}` : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`,
 			);
 		}
 		if (state.lastInbound) {
@@ -642,8 +660,10 @@ export default function createExtension(pi) {
 	}
 
 	pi.on("session_start", (event, ctx) => {
-		// 新会话 → 新 ctx：重新选举负责人（同一会话的重复加载共用同一个 ctx）
-		if (state.sessionCtx !== ctx) {
+		// 换会话后旧负责人已经作废：无论 ctx 对象是否相同，都要重新选举
+		// （同一个会话里的重复加载不经过 session_shutdown，仍按 ctx 身份去重）
+		if (state.ownerStale || state.sessionCtx !== ctx) {
+			state.ownerStale = false;
 			state.sessionCtx = ctx;
 			state.owner = pi;
 		} else if (state.owner && state.owner !== pi) {
@@ -687,12 +707,15 @@ export default function createExtension(pi) {
 		// 「旧句柄即将作废」处理：暂停注入、暂存消息，等新实例的 session_start 接棒。
 		if (reason === "quit" || reason === "exit" || reason === "shutdown") {
 			state.owner = undefined;
+			state.ownerStale = false;
 			stop();
 			return;
 		}
 		if (reason !== "new" && reason !== "resume" && reason !== "fork" && reason !== "reload") {
 			state.logger?.warn(`未知的 session_shutdown reason=${reason}，按换会话处理（保留网关）`);
 		}
+		// 旧负责人句柄马上作废：下一次 session_start 必须无条件重新选举
+		state.ownerStale = true;
 		// 这次是真换了会话：请求侧超时/取消时不要再 cancelSwitch（交给看门狗与接棒）
 		if (state.pendingExec) state.pendingExec.sawShutdown = true;
 		state.bridge?.beginSwitch();
@@ -722,4 +745,4 @@ export default function createExtension(pi) {
 }
 
 // 方便测试
-export { lockFilePath };
+export { lockFilePath, maskAppId };

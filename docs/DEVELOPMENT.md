@@ -27,15 +27,15 @@ pi install .
 ## 测试
 
 ```bash
-npm test                  # 131 项：配置、文本、分片、预算、额度、去重、锁、服务、媒体上传、
+npm test                  # 148 项：配置、文本、分片、预算、额度、去重、锁、服务、媒体上传、
                           #      会话切换回归、QQ 侧桌面命令、启动参数（auto/none/数组）、长回答落盘
-npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
+npm run e2e               # 真 pi --mode rpc + mock QQ，会调两次模型
 npm run e2e:service       # 后台服务进程生命周期，不调模型
 npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop
 ```
 
 `npm test` 全部走 `test/mock-qq.mjs`（本地 HTTP + 最小 WebSocket 服务端），不接触真实 QQ。
-`npm run e2e` 会花一次模型调用，不要放进循环。
+`npm run e2e` 会花两次模型调用，不要放进循环。
 
 ## 目录
 
@@ -54,7 +54,7 @@ test/                 单测、mock 平台、端到端
 
 ```bash
 node bin/pi-qq-connect.mjs --dry-run   # 确认启动参数与预期一致
-npm test                               # 131 项全过
+npm test                               # 148 项全过
 npm pack --dry-run                     # 检查 files 白名单：不应出现凭据、日志、.git、test/
 git tag v0.4.1 && git push --tags      # 先推仓库，再发 npm
 npm publish                            # prepublishOnly 会再跑一次 npm test

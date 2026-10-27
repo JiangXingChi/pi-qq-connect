@@ -2,7 +2,7 @@
  * 端到端：真 pi（--mode rpc）加载本扩展，对接 mock QQ。
  *
  * 跑法：node test/e2e.mjs [--timeout 180]
- * 会真实调用一次模型（默认 provider/model），提示词只有「请只回复：pong」。
+ * 会真实调用两次模型（默认 provider/model），提示词是「请只回复：pong」与「请只回复：pong2」。
  */
 
 import { spawn } from "node:child_process";
@@ -51,8 +51,10 @@ let stderr = "";
 child.stderr.on("data", (chunk) => {
 	stderr += chunk.toString();
 });
-child.stdout.on("data", () => {
-	// RPC 事件不需要逐条处理，保持管道不阻塞
+let rpcOut = "";
+child.stdout.on("data", (chunk) => {
+	// 保持管道不阻塞；同时留一份给「命令通道仍可用」断言用
+	rpcOut += chunk.toString();
 });
 
 function fail(message) {
@@ -119,10 +121,16 @@ try {
 	console.log("✔ 新会话里继续对话成功");
 	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/new 期间网关被重连了");
 
-	// 换会话后命令必须仍然可用（扩展实例被重新注册），且不能再报「桥已失效」
+	// 换会话后 QQ 侧的桥还活着
 	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-status-1", userOpenId: "e2e-user", content: "/qq status" }), "e2e-status-1");
-	await until(() => mock.state.sends.some((s) => /网关：/.test(String(s.body.content ?? ""))), "换会话后 /qq status 仍可用");
-	console.log("✔ 换会话后 /qq status 仍可用");
+	await until(() => mock.state.sends.some((s) => /网关：/.test(String(s.body.content ?? ""))), "换会话后 QQ 侧 /qq status 仍可用");
+	console.log("✔ 换会话后 QQ 侧 /qq status 仍可用");
+
+	// 换会话后 pi 自己的命令通道也必须仍可用：走 RPC prompt 才真正用到 pi.registerCommand
+	// （QQ 侧的 /qq 由桥直接处理，绕过了命令注册，测不出 0.4.0 那个 bug）
+	child.stdin.write(JSON.stringify({ id: "e2e-cmd-1", type: "prompt", message: "/qq status" }) + "\n");
+	await until(() => /配置：/.test(rpcOut), "换会话后 pi 命令通道可用");
+	console.log("✔ 换会话后 pi 命令通道可用（/qq 重新注册成功）");
 	const logText = safeLog();
 	if (/stale after session replacement/i.test(logText)) throw new Error("换会话后出现 stale 报错");
 	if (/换会话 30 秒内没有完成/.test(logText)) throw new Error("换会话没收到 session_start，走了 30 秒看门狗");

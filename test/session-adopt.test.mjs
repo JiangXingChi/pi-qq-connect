@@ -13,6 +13,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { DEFAULT_CONFIG } from "../src/config.js";
+import * as sessionMod from "../src/session.js";
 import { QqBridge } from "../src/session.js";
 import { createFakePi, sleep, tempConfigPath, waitFor, writeConfig } from "./harness.mjs";
 
@@ -114,11 +115,12 @@ test("T1 同一个 pi 对象重复加载只注册一次", async (t) => {
 
 	mod.default(fake.pi); // 自动发现 + 显式 --extension 命中同一路径
 
-	await t.test("命令没有被重复注册", () => assert.equal(fake.commandRegistrations.length, registrations));
 	await t.test("事件监听没有被重复注册", () => {
+		assert.equal(fake.commandRegistrations.length, registrations);
 		assert.equal(fake.handlerCount("session_start"), starts);
 		assert.equal(fake.handlerCount("session_shutdown"), shutdowns);
 	});
+	await t.test("初始化阶段不注册命令（命令在 session_start 由负责人注册）", () => assert.equal(registrations, 0));
 });
 
 test("T2 新会话实例重新注册命令与事件", async (t) => {
@@ -152,8 +154,10 @@ test("T2b 同一会话里两个 pi 对象只让一个实例处理事件", async 
 	await first.emit("session_start", { reason: "startup" }, shared);
 	await second.emit("session_start", { reason: "startup" }, shared);
 
-	await t.test("事件只绑定到被选中的那个实例", () => {
-		assert.ok(state.owner === first.pi || state.owner === second.pi);
+	await t.test("先收到 session_start 的实例当选", () => assert.equal(state.owner, first.pi));
+	await t.test("后到的实例不会篡改负责人", async () => {
+		await first.emit("session_start", { reason: "startup" }, shared);
+		assert.equal(state.owner, first.pi);
 	});
 	const ownerFake = state.owner === first.pi ? first : second;
 	const otherFake = ownerFake === first ? second : first;
@@ -354,8 +358,64 @@ test("T13 切换期间暂存受队列上限约束，超限丢弃并计数", asyn
 	assert.equal(overflow.accepted, false);
 	assert.equal(overflow.reason, "暂存已满");
 	assert.equal(bridge.deferred.length, bridge.cfg.maxQueue);
+	assert.equal(bridge.stats.ignored, 1, "丢弃要计数");
 	bridge.endSwitch();
 	bridge.stop();
+});
+
+test("T15 开新会话失败：只有没见过 session_shutdown 才立刻 cancelSwitch", async (t) => {
+	const { shouldCancelSwitch } = mod;
+	await t.test("纯失败（被取消/报错）→ 立刻取消切换", () => {
+		assert.equal(shouldCancelSwitch({ ok: false, owner: true, sawShutdown: undefined }), true);
+	});
+	await t.test("已经换了会话 → 交给看门狗与接棒", () => {
+		assert.equal(shouldCancelSwitch({ ok: false, owner: true, sawShutdown: true }), false);
+	});
+	await t.test("成功或不是发起者 → 不动", () => {
+		assert.equal(shouldCancelSwitch({ ok: true, owner: true, sawShutdown: undefined }), false);
+		assert.equal(shouldCancelSwitch({ ok: false, owner: false, sawShutdown: undefined }), false);
+	});
+	await t.test("session_shutdown 会把 sawShutdown 标到 pendingExec 上", async () => {
+		resetRuntimeForTests();
+		const fake = createFakePi();
+		const state = mod.default(fake.pi);
+		await fake.emit("session_start", { reason: "startup" }, fakeCtx());
+		state.bridge = trackingBridge(fake.pi);
+		state.pendingExec = { done() {}, sawShutdown: undefined };
+		await fake.emit("session_shutdown", { reason: "new" });
+		assert.equal(state.pendingExec.sawShutdown, true);
+		state.pendingExec = undefined;
+		state.bridge = undefined;
+	});
+});
+
+test("T16 注入失败重试按 2s→4s→…→30s 退避", () => {
+	const { retryDelayFor } = sessionMod;
+	assert.deepEqual(
+		[1, 2, 3, 4, 5, 10].map((n) => retryDelayFor(n)),
+		[2000, 4000, 8000, 16000, 30000, 30000],
+	);
+});
+
+test("T17 队列里的斜杠命令会被改走命令通道，绝不喂模型", async () => {
+	const handled = [];
+	const { bridge, injected } = makeBridge({ onCommand: (command) => (handled.push(command), { text: "ok" }) });
+	bridge.queue.push(item("c1", "/help"));
+	void bridge.pump();
+	await waitFor(() => handled.length === 1, { label: "命令通道被调用" });
+	assert.equal(injected.length, 0);
+	bridge.stop();
+});
+
+test("T18 日志脱敏辅助函数", async (t) => {
+	const { maskAppId } = mod;
+	const { maskUrl } = sessionMod;
+	await t.test("AppID 只留前 4 后 3", () => assert.equal(maskAppId("1234567890"), "1234***890"));
+	await t.test("太短的 AppID 全掩", () => assert.equal(maskAppId("12345"), "***"));
+	await t.test("媒体 URL 只留 origin", () => {
+		assert.equal(maskUrl("https://multimedia.nt.qq.com.cn/download?appid=1&rkey=x"), "https://multimedia.nt.qq.com.cn");
+	});
+	await t.test("非法 URL 不抛", () => assert.equal(maskUrl("not a url"), "（无效 URL）"));
 });
 
 test("T14 同一会话重复加载时命令只注册一次", async (t) => {
