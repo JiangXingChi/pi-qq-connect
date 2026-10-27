@@ -14,8 +14,9 @@
 - 单聊「正在输入」；长回复按代码围栏切块；失败换新 `msg_seq` 重试
 - 出站图片/文件：回复末尾 `[[file:/绝对路径]]`，分片上传后以图片/文件卡片发出
 - 入站去重、串行队列、被动回复预算、窗口兜底、单实例锁、后台常驻服务
-- 会话切换后旧句柄失效时只提示一次并停桥（不再静默丢消息），`/qq new` 后自动重建
-- `/new`、`/resume`、`/qq new` 都不会把网关断掉重连
+- 会话切换后旧句柄失效时只提示一次并停桥（不再静默丢消息），`/new` 后自动重建
+- `/new`、`/resume` 都不会把网关断掉重连
+- QQ 里可用桌面命令：`/new` `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help`
 
 ## 前置：注册 QQ 机器人
 
@@ -79,17 +80,33 @@ pi install .
 | 启动后台 | `/qq start`：拉起常驻 pi，QQ 会话交给它 |
 | 停止 | `/qq stop`：停后台服务；没有服务时断开本进程网关 |
 | 看日志 | `/qq log 50` |
-| 开新会话 | QQ 里发 `/qq new`（或 `/qq new 名字`），等同终端 `/new` |
+| 开新会话 | QQ 里发 `/new`（或 `/new 名字`） |
+| 换模型 | `/model` 看清单，`/model 3` 或 `/model provider/id` 切换 |
+| 其它桌面命令 | `/thinking` `/compact` `/session` `/name` `/tools` `/help` |
 | 网关被占用 | `/qq take`：强制接管锁（仅锁冲突时用，对方 30 秒内自停） |
 | 发文件 | 让 Pi 在回复末尾写 `[[file:/绝对路径]]`，最多 3 个 |
 
-命令共 6 条：`status` / `start` / `stop` / `new` / `log` / `take`。
+QQ 里的 `/qq` 命令共 5 条：`status` / `start` / `stop` / `log` / `take`（`new` 已并入 `/new`，仍可用）。
 
-后台服务在线时，终端里的 `/qq new` 不会切 QQ 会话（会提示你在 QQ 里发），终端 `/new`
-也只切本地 TUI；QQ 会话由服务进程管理。
+后台服务在线时，终端里的 `/qq start`、`/qq stop`、`/qq take` 才起作用；QQ 会话由服务进程管理，
+终端 `/new` 只切本地 TUI。
 
-QQ 侧只认一个命令：`/qq new`（可选带名字）。其余内容都当普通任务交给 Pi。
-`/qq new` 会清空待处理队列和旧输出；正在跑的那一轮不会被中断——流式期间发 `/qq new` 可能失败，等这轮结束再发。
+### QQ 里的命令
+
+以 `/` 开头的消息不会喂给模型，而是当命令执行，和终端里敲命令一样：
+
+| 命令 | 作用 |
+|---|---|
+| `/new [名称]` | 开新会话，清空队列，网关不断 |
+| `/model` / `/model 3` / `/model provider/id` | 列模型、按序号或名字切换 |
+| `/thinking [级别]` | 查看或切换思考级别（off…max） |
+| `/compact [说明]` | 压缩上下文 |
+| `/session` | 模型、思考级别、上下文用量、会话名、工具数 |
+| `/name [名称]` | 设置会话名 |
+| `/tools` | 当前启用的工具 |
+| `/help` | 命令表 |
+| `/skill:xxx`、提示模板、其它插件命令 | 原样交给 Pi 执行 |
+| TUI 专用命令（`/resume` `/tree` `/export` 等） | 明确回「只能在终端用」，不会被当成提问 |
 
 ### 发文件
 
@@ -167,11 +184,48 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 | `passiveWindowSec` | 群 300 / 单聊 3600 | 被动回复窗口 |
 | `images.maxCount/maxBytes` | 2 / 8MB | 入站图片限制 |
 | `lock` | true | 单实例锁（`~/.pi/agent/pi-qq-connect.lock`） |
+| `extensions` | auto | 后台服务加载哪些 Pi 插件：`auto` 交给 Pi 自己发现（与终端一致）/ `none` 只加载自身 / `["npm:包名", "/绝对/路径", "builtin:tool-search"]` 白名单 |
+| `overflow` | file | 回答超过分片上限时：`file` 全文存附件发出去 / `truncate` 只发前几段 |
+| `replyDir` | `~/.pi/agent/qq-replies` | `overflow=file` 时全文的落盘目录 |
 | `log.file/level` | `~/.pi/agent/pi-qq-connect.log` / info | 日志 |
 | `endpoints` | 空 | 测试用：覆盖 token / api / 网关地址 |
 
 环境变量：`PIQQCONNECT_CONFIG`、`PIQQCONNECT_APP_ID`、`PIQQCONNECT_CLIENT_SECRET`、`PIQQCONNECT_SANDBOX=1`、
 `PIQQCONNECT_DISABLED=1`。
+
+### 与终端一致（extensions）
+
+早期版本用 `--no-extensions` 拉起后台服务，只有本插件能加载，结果 QQ 里没有记忆、不能联网、
+用不了子代理，而且从报错里看不出原因。0.3.0 改成读 `pi list` 拼白名单，仍然漏掉了内置扩展，
+也不尊重 `pi config` 里禁用的包。
+
+0.4.0 起默认 `extensions: "auto"`：**不加任何扩展参数，让 Pi 自己走完整发现流程**——
+内置扩展、`settings.json` 里的包、`~/.pi/agent/extensions`、项目 `.pi/extensions`、
+技能、提示模板、主题、`AGENTS.md`，与终端会话完全同一套。
+
+```json
+{ "extensions": "auto" }
+{ "extensions": "none" }
+{ "extensions": ["npm:pi-hermes-memory", "npm:pi-web-access", "builtin:tool-search"] }
+```
+
+- 本插件永远只加载一份：入口用 `Symbol.for` 幂等守卫，自动发现与显式 `--extension` 同时命中时只注册一次。
+- `"none"` 是隔离模式（QQ 里只有本插件的能力）；数组是白名单，`builtin:` 原样透传。
+- 代价：加载得越多，每轮系统提示越长，QQ 每条消息越费 token。只想聊天就设 `"none"`。
+- 改了这项要重启后台服务才生效（`/qq stop` 再 `/qq start`，或 `systemctl --user restart`）。
+- 排查「QQ 里为什么没有某个插件」：
+
+  ```bash
+  pi-qq-connect --dry-run          # 打印真正会执行的 pi 参数
+  pi list                          # 已安装的包
+  tail -5 ~/.pi/agent/pi-qq-connect.log
+  ```
+
+### 长回答
+
+QQ 每条被动回复最多 5 次、单段 4000 字量级。回答超过分片上限时，插件把完整正文写成
+`~/.pi/agent/qq-replies/reply-<时间>-<随机>.md` 随回复一起发出去，正文只发前几段并注明
+「全文见附件」；落盘失败自动退回截断。想保持 0.3.0 的截断行为就设 `"overflow": "truncate"`。
 
 ## 必须知道的限制
 
@@ -191,16 +245,15 @@ loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机�
 | 网关一直「重连中」 | `/qq log 50`：4004 凭据错、4008 限流、4013/4014 intents 没开、4914/4915 沙箱/封禁 |
 | QQ 里没反应 | 群聊必须 @；确认 `allowUsers`/`allowGroups` 里有你的 openid |
 | 回复「消息发送超频」 | 触发回复上限或窗口过期，等用户再发一条 |
-| `/qq new` 后 QQ 消息没反应 | 0.2.9 以前旧句柄失效会静默丢弃消息；现在只提示一次并停桥。仍无反应就 `/qq stop` 再 `/qq start` |
+| `/new` 后 QQ 消息没反应 | 0.2.9 以前旧句柄失效会静默丢弃消息；现在只提示一次并停桥。仍无反应就 `/qq stop` 再 `/qq start` |
+| 某个插件在 QQ 里不生效 | `pi-qq-connect --dry-run` 看启动参数；确认 `extensions` 不是 `none`，且该包在 `pi config` 里是启用的 |
 | 文件发送失败 | 日志里有 `err_code` 和 `trace_id`；常见 40093006 是合并参数、850031 是超大小 |
 
 ## 开发
 
 ```bash
-npm test                  # 64 项单测 + mock QQ
-npm run e2e               # 真 pi --mode rpc + mock QQ（会调一次模型）
-npm run e2e:service       # 后台服务进程生命周期
-npm run e2e:service-cmd   # 真 pi 里 /qq start|stop
+npm test                  # node --test test/：命令、启动参数、切换暂存、长回答落盘
+pi-qq-connect --dry-run   # 打印会执行的 pi 参数（不启动）
 ```
 
 - 架构与协议细节：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)

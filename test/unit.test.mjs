@@ -316,7 +316,7 @@ test("桥：被动回复额度用完就停", async () => {
 	const bridge = new QqBridge({
 		pi: fake.pi,
 		api,
-		config: normalizeConfig({ allowAll: true, maxChunks: 4, replyQuota: 2, chunkChars: 200 }),
+		config: normalizeConfig({ allowAll: true, maxChunks: 4, replyQuota: 2, chunkChars: 200, overflow: "truncate" }),
 		log: silentLog,
 	});
 	bridge.enqueue(privateItem());
@@ -329,28 +329,44 @@ test("桥：被动回复额度用完就停", async () => {
 	assert.equal(api.sends.length, 2);
 });
 
-test("桥：/qq new 不注入模型，切完回执", async () => {
+test("桥：/new 走命令通道，不注入模型", async () => {
 	const fake = createFakePi();
 	const api = stubApi();
-	let requested = null;
+	const commands = [];
 	const bridge = new QqBridge({
 		pi: fake.pi,
 		api,
 		config: normalizeConfig({ allowAll: true }),
 		log: silentLog,
-		onNewSession: (args) => {
-			requested = args;
+		onCommand: async (command) => {
+			commands.push(command);
+			return { text: "✅ 已开新会话（新话题）" };
 		},
 	});
-	bridge.enqueue(privateItem({ msgId: "cmd-1", text: "/qq new 新话题" }));
-	await waitFor(() => requested !== null, { label: "/qq new 回调" });
-	assert.equal(requested, "新话题");
-	assert.equal(fake.sent.length, 0, "不应注入模型");
-
-	await bridge.onSessionSwitched();
-	assert.equal(api.sends.length, 1);
-	assert.match(api.sends[0].content, /已开新会话/);
+	bridge.enqueue(privateItem({ msgId: "cmd-1", text: "/new 新话题" }));
+	await waitFor(() => commands.length === 1, { label: "/new 派发" });
+	assert.deepEqual(commands[0], { name: "new", args: "新话题", raw: "/new 新话题" });
+	assert.equal(fake.sent.length, 0, "命令不应注入模型");
+	await waitFor(() => api.sends.length === 1);
+	assert.match(api.sends[0].content, /已开新会话（新话题）/);
 	assert.equal(api.sends[0].msgId, "cmd-1");
+});
+
+test("桥：/qq new 只回改名提示，不再切会话", async () => {
+	const fake = createFakePi();
+	const api = stubApi();
+	const bridge = new QqBridge({
+		pi: fake.pi,
+		api,
+		config: normalizeConfig({ allowAll: true }),
+		log: silentLog,
+		onCommand: (command) =>
+			command.name === "qq" && command.args.trim() === "new" ? { text: "「/qq new」已并入「/new」，直接发 /new 即可" } : null,
+	});
+	bridge.enqueue(privateItem({ msgId: "cmd-2", text: "/qq new" }));
+	await waitFor(() => api.sends.length === 1);
+	assert.match(api.sends[0].content, /已并入「\/new」/);
+	assert.equal(fake.sent.length, 0);
 });
 
 test("桥：换会话后旧队列作废", async () => {
@@ -367,7 +383,7 @@ test("桥：换会话后旧队列作废", async () => {
 	assert.equal(api.sends.length, 0, "旧会话的输出不应再发到 QQ");
 });
 
-test("桥：/qq new 失败会给 QQ 回执", async () => {
+test("桥：命令处理器抛错时回一句失败", async () => {
 	const fake = createFakePi();
 	const api = stubApi();
 	const bridge = new QqBridge({
@@ -375,32 +391,14 @@ test("桥：/qq new 失败会给 QQ 回执", async () => {
 		api,
 		config: normalizeConfig({ allowAll: true }),
 		log: silentLog,
-		onNewSession: () => {},
+		onCommand: async () => {
+			throw new Error("模拟失败");
+		},
 	});
-	bridge.enqueue(privateItem({ msgId: "cmd-2", text: "/qq new" }));
-	await waitFor(() => bridge.pendingNew !== undefined);
-	bridge.notifyNewSessionFailed("模拟失败");
+	bridge.enqueue(privateItem({ msgId: "cmd-3", text: "/new" }));
 	await waitFor(() => api.sends.length === 1);
-	assert.match(api.sends[0].content, /开新会话失败/);
-	assert.equal(api.sends[0].msgId, "cmd-2");
-});
-
-test("桥：手动 resume 时丢弃待确认的 /qq new", async () => {
-	const fake = createFakePi();
-	const api = stubApi();
-	const bridge = new QqBridge({
-		pi: fake.pi,
-		api,
-		config: normalizeConfig({ allowAll: true }),
-		log: silentLog,
-		onNewSession: () => {},
-	});
-	bridge.enqueue(privateItem({ msgId: "cmd-3", text: "/qq new" }));
-	await waitFor(() => bridge.pendingNew !== undefined);
-	bridge.clearPendingNew();
-	bridge.reset();
-	await bridge.onSessionSwitched();
-	assert.equal(api.sends.length, 0, "resume 不应发「已开新会话」");
+	assert.match(api.sends[0].content, /命令执行失败：模拟失败/);
+	assert.equal(api.sends[0].msgId, "cmd-3");
 });
 
 test("桥：msg_id 去重", async () => {
@@ -418,7 +416,7 @@ test("桥：回复预算截断", async () => {
 	const bridge = new QqBridge({
 		pi: fake.pi,
 		api,
-		config: normalizeConfig({ allowAll: true, maxChunks: 2, chunkChars: 120 }),
+		config: normalizeConfig({ allowAll: true, maxChunks: 2, chunkChars: 120, overflow: "truncate" }),
 		log: silentLog,
 	});
 	bridge.enqueue(privateItem());
@@ -664,17 +662,28 @@ test("集成：扩展 → 网关 → 注入 → 回 QQ", async () => {
 	await fake.commands.get("qq").handler("status", ctx);
 	assert.ok(ctx.notifications.some((n) => /网关/.test(n.message)));
 
-	// QQ 侧 /qq new：派发给扩展命令，切完回执，网关不断
+	// QQ 侧 /new：派发给内部命令 /qq __new，命令执行完直接回执，网关不断
 	const identifyBeforeCmd = mock.state.identifies.length;
-	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-1", userOpenId: "user-1", content: "/qq new" }));
-	await waitFor(() => fake.sent.some((s) => String(s.content).startsWith("/qq new")), { label: "/qq new 派发" });
-	const dispatched = fake.sent.find((s) => String(s.content).startsWith("/qq new"));
+	const newSessionsBefore = ctx.newSessions.length;
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-1", userOpenId: "user-1", content: "/new" }));
+	await waitFor(() => fake.sent.some((s) => String(s.content).trim() === "/qq __new"), { label: "/new 派发" });
+	const dispatched = fake.sent.find((s) => String(s.content).trim() === "/qq __new");
 	assert.equal(dispatched.options?.expandPromptTemplates, true);
 
+	await fake.commands.get("qq").handler("__new", ctx);
+	assert.equal(ctx.newSessions.length, newSessionsBefore + 1, "/new 应调用 ctx.newSession");
 	await fake.emit("session_shutdown", { type: "session_shutdown", reason: "new" }, ctx);
 	await fake.emit("session_start", { type: "session_start", reason: "new" }, ctx);
 	await waitFor(() => mock.state.sends.some((s) => /已开新会话/.test(String(s.body.content ?? ""))), { label: "新会话回执" });
-	assert.equal(mock.state.identifies.length, identifyBeforeCmd, "/qq new 不应重连网关");
+	assert.equal(mock.state.identifies.length, identifyBeforeCmd, "/new 不应重连网关");
+
+	// /qq new 只剩改名提示，不会再切会话
+	const sendsBeforeAlias = mock.state.sends.length;
+	const sessionsBeforeAlias = ctx.newSessions.length;
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-2", userOpenId: "user-1", content: "/qq new" }));
+	await waitFor(() => mock.state.sends.length > sendsBeforeAlias, { label: "/qq new 别名提示" });
+	assert.match(String(mock.state.sends.at(-1).body.content ?? ""), /已并入「\/new」/);
+	assert.equal(ctx.newSessions.length, sessionsBeforeAlias, "/qq new 不应再切会话");
 
 	assert.equal(extension.error, null);
 } finally {
@@ -721,7 +730,7 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 
 	await fake.commands.get("qq").handler("new", ctx);
 	assert.equal(ctx.newSessions.length, 0, "服务在线时终端 /qq new 不应切换本地会话");
-	assert.ok(ctx.notifications.some((n) => /QQ 里发 \/qq new/.test(n.message)));
+	assert.ok(ctx.notifications.some((n) => /QQ 里发 \/new/.test(n.message)));
 
 	// 环境变量被工具子进程继承、但 ppid 不对：仍按 TUI 处理，不许借服务身份绕过
 	const beforeSpoof = ctx.newSessions.length;
@@ -758,7 +767,8 @@ test("集成：缺配置时不连接并给出提示", async () => {
 	const configPath = tempConfigPath();
 	fs.rmSync(configPath, { force: true });
 	process.env.PIQQCONNECT_CONFIG = configPath;
-	const { default: createExtension } = await import("../src/index.js");
+	const { default: createExtension, resetRuntimeForTests } = await import("../src/index.js");
+	resetRuntimeForTests();
 	const fake = createFakePi();
 	const ctx = createFakeCtx();
 	createExtension(fake.pi);

@@ -28,12 +28,13 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
 | `src/api.js` | 网关地址、消息、Markdown、typing、富媒体上传与发送 |
 | `src/gateway.js` | 零依赖 WebSocket：Hello/Identify/Resume/心跳/重连/关闭码分类 |
 | `src/text.js` | 事件归一化、@ 清理、引用消息、信封、Markdown 清理、代码围栏分片 |
-| `src/session.js` | QQ ⇄ Pi 桥：队列、注入、回答收集、回复预算、`/qq new`、出站文件 |
+| `src/session.js` | QQ ⇄ Pi 桥：队列、命令拦截、注入、回答收集、回复预算、长回答落盘、出站文件 |
+| `src/commands.js` | QQ 侧桌面命令：`/new` `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help` |
 | `src/media.js` | `[[file:路径]]` 解析、敏感路径/大小校验、分片上传 |
 | `src/service.js` | 后台常驻服务状态文件、心跳、起停、stale pid 处理 |
 | `src/lock.js` | 单实例锁 + 看门狗 |
 | `src/log.js` | 文件日志、级别过滤、2 MiB 轮转 |
-| `bin/pi-qq-connect.mjs` | detached 启动 `pi --mode rpc --session-id pi-qq-connect-service --extension <dir>` |
+| `bin/pi-qq-connect.mjs` | detached 启动 `pi --mode rpc --session-id pi-qq-connect-service --extension <dir>`，排空 stdout 并自动应答扩展对话框 |
 
 ## 一次消息的生命周期
 
@@ -41,15 +42,40 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
 2. 权限过滤（`allowUsers` / `allowGroups` / `allowAll`）、`msg_id` 去重、入队（上限 `maxQueue`）。
 3. 等 `agent_settled` 后 `pi.sendUserMessage()` 注入；`before_agent_start` 标记这轮来自 QQ。
 4. `message_end` 收集最终 assistant 文本；`agent_settled` 触发 `#deliver`。
-5. 去掉 `[[file:...]]` 后按 4000 字/段切片（保留代码围栏），用 `msg_id + msg_seq` 被动回复。
+5. 去掉 `[[file:...]]` 后按 4000 字/段切片（保留代码围栏），用 `msg_id + msg_seq` 被动回复；
+   段落数超过本轮额度时，全文写进 `replyDir` 当附件发（`overflow: "file"`），落盘失败才截断。
 6. 文件逐个上传（`upload_prepare → PUT → part_finish → /files`），再 `msg_type=7` 发送。
 
-## 会话切换
+## 命令（0.4.0）
 
-QQ 里发 `/qq new`：桥拦截，不注入模型，改用
-`pi.sendUserMessage("/qq new", { expandPromptTemplates: true })` 派发扩展命令，handler 拿到新鲜的
-`ExtensionCommandContext` 调 `ctx.newSession()`。`session_shutdown(reason="new")` /
-`session_start(reason="new")` 时插件不重建网关、不释放锁；桥清空旧队列并回执。
+以 `/` 开头的消息由桥拦截，**不注入模型**：
+
+1. `parseCommand()` 切出 `{name, args}`；
+2. `src/commands.js` 认识的（`/new` `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help`）
+   直接用扩展 API 执行，结果当纯文本回执；
+3. TUI 专用命令（`/resume` `/tree` `/export` …）明确回「只能在终端用」，不会被当成提问；
+4. `pi.getCommands()` 里有的（技能 `/skill:x`、提示模板、其它插件的命令）原样
+   `sendUserMessage(..., { expandPromptTemplates: true })` 转发，且**不加信封头**，否则不再以 `/` 开头；
+5. 都不匹配 → 回一句「不认识的命令」，同样不进模型。
+
+`/new` 需要 `ExtensionCommandContext.newSession()`，只能在命令处理器里调。桥的处理方式是派发一句
+内部命令 `/qq __new`：`requestNewSession()` 先把结果 promise 挂到 `state.pendingExec`，命令处理器
+执行完 `ctx.newSession()` 直接把真实结果 resolve 回去（0.3.0 及以前是轮询 15 秒，常报假失败）。
+`/qq new` 保留为别名，行为相同；`/qq new` 在 QQ 里只会回一条「已并入 `/new`」。
+
+换会话期间（`bridge.beginSwitch()`）到达的消息进 `deferred` 暂存；`session_start(reason="new")`
+触发 `endSwitch()` 放回队列。若 30 秒内没等到 `session_start`（被拒绝、报错、超时），定时器或
+`requestNewSession()` 的失败分支会 `cancelSwitch()`，绝不让消息卡在暂存区。
+
+## 资源加载（0.4.0）
+
+启动参数默认 `extensions: "auto"`：只加 `--extension <本插件>`，**不加** `--no-extensions`，
+让 Pi 自己走完整发现流程（内置扩展、settings 里的包、`~/.pi/agent/extensions`、项目 `.pi/extensions`、
+技能、模板、主题、`AGENTS.md`）。QQ 会话因此与终端会话加载同一套资源。
+
+`extensions: "none"` 退回隔离模式（`--no-extensions` + 只挂自身）；数组是白名单，
+`builtin:tool-search` 这类条目原样透传。自动发现与显式 `--extension` 同时命中时，
+入口的 `Symbol.for` 幂等守卫保证只注册一次。
 
 Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再用会抛
 `This extension ctx is stale after session replacement or reload...`。插件对这个错误的处理是：
@@ -64,14 +90,14 @@ Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再�
 
 ## 进程角色
 
-同一份代码会在三种角色里运行，判断错了就会出现「服务在跑但 CLI 也连网关」或「QQ 里
-`/qq new` 被当成终端命令拒绝」：
+同一份代码会在三种角色里运行，判断错了就会出现「服务在跑但 CLI 也连网关」或「终端 `/new`
+把线上 QQ 会话切走」：
 
 | 角色 | 识别方式 | 行为 |
 |---|---|---|
 | 普通 TUI（无服务） | 状态文件不存在/心跳过期 | 连网关、持锁 |
 | TUI 控制面（服务在线） | 状态文件健康，且不是服务进程 | 不连网关、不抢锁，只执行 `/qq status/start/stop` |
-| 后台服务进程 | `PIQQCONNECT_SERVICE_PID === 状态文件 pid` **且** `ppid === 状态文件 pid` | 连网关；`/qq new` 放行 |
+| 后台服务进程 | `PIQQCONNECT_SERVICE_PID === 状态文件 pid` **且** `ppid === 状态文件 pid` | 连网关；`/new` 放行 |
 
 只比对环境变量不够：服务里的工具子进程会继承它，孙进程会被误认成服务。`ppid` 检查
 把范围限定在启动器直接拉起的那一个 `pi` 子进程。

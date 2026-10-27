@@ -8,9 +8,12 @@
  */
 
 import { randomInt } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 import { parseFileMarkers, uploadFile } from "./media.js";
 import { buildPrompt, chatKey, chunkText, isAllowed, maskId, replyTarget, stripMarkdown } from "./text.js";
+import { parseCommand } from "./commands.js";
 
 /**
  * Pi 换会话/重载后会作废旧 pi、旧 ctx 句柄；pi 1.x 的固定文案如下。
@@ -65,15 +68,37 @@ async function downloadImage(url, maxBytes, headers = {}) {
 	}
 }
 
+/**
+ * 回答超过分片上限时把完整正文写成文件，随回复一起发出去（终端里能看全的东西，QQ 也要能看全）。
+ * 落盘失败就退回截断，不能让回复发不出去。
+ */
+export async function writeOverflowFile(body, cfg, log) {
+	try {
+		let dir = cfg.replyDir;
+		const allowDirs = cfg.files?.allowDirs ?? [];
+		if (allowDirs.length > 0 && !allowDirs.some((allowed) => path.resolve(dir).startsWith(path.resolve(allowed)))) {
+			dir = allowDirs[0];
+		}
+		await fs.promises.mkdir(dir, { recursive: true });
+		const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+		const file = path.join(dir, `reply-${stamp}-${randomInt(1000, 9999)}.md`);
+		await fs.promises.writeFile(file, `${body}\n`, "utf8");
+		return file;
+	} catch (err) {
+		log?.warn?.(`长回答落盘失败：${err?.message ?? err}`);
+		return null;
+	}
+}
+
 export class QqBridge {
-	constructor({ pi, api, config, log, notify, isOnline, onNewSession, onFatal, injectTimeoutMs = 5000 }) {
+	constructor({ pi, api, config, log, notify, isOnline, onCommand, onFatal, injectTimeoutMs = 5000 }) {
 		this.pi = pi;
 		this.api = api;
 		this.cfg = config;
 		this.log = log;
 		this.notify = notify ?? (() => {});
 		this.isOnline = isOnline;
-		this.onNewSession = onNewSession;
+		this.onCommand = onCommand;
 		this.queue = [];
 		this.inflight = undefined;
 		this.running = false;
@@ -86,12 +111,13 @@ export class QqBridge {
 		this.stopped = false;
 		this.seen = new Map();
 		this.lastByChat = new Map();
-		this.pendingNew = undefined;
+		this.switching = false;
 		this.deferred = [];
 		this.generation = 0;
 		this.retryTimer = undefined;
 		this.ackTimer = undefined;
 		this.injectTimer = undefined;
+		this.switchTimer = undefined;
 		this.stats = { received: 0, ignored: 0, sent: 0, failed: 0 };
 	}
 
@@ -116,25 +142,35 @@ export class QqBridge {
 		this.injecting = false;
 	}
 
-	/** 新会话就绪：回执并清空旧状态。 */
-	async onSessionSwitched() {
-		const pending = this.pendingNew;
-		const deferred = this.deferred;
-		this.pendingNew = undefined;
+	/** 换会话开始：期间到达的消息先暂存，等 session_start 之后再放回队列。 */
+	beginSwitch() {
+		this.switching = true;
 		this.deferred = [];
-		this.reset();
-		if (pending) {
-			const temp = { seqs: new Set(), attemptsLeft: 1 };
-			try {
-				await this.api.sendText(replyTarget(pending.item), "✅ 已开新会话", {
-					msgId: pending.item.msgId,
-					msgSeq: this.#nextSeq(temp),
-				});
-				this.stats.sent++;
-			} catch (err) {
-				this.log.warn(`新会话回执发送失败：${err?.message ?? err}`);
-			}
+		// 兜底：Pi 没给 session_start（拒绝/报错/被打断）时不能一直暂存消息
+		if (this.switchTimer) clearTimeout(this.switchTimer);
+		this.switchTimer = setTimeout(() => {
+			this.switchTimer = undefined;
+			if (!this.switching) return;
+			this.log.warn("换会话 30 秒内没有完成，恢复队列");
+			this.cancelSwitch();
+		}, 30_000);
+		this.switchTimer.unref?.();
+	}
+
+	#clearSwitchTimer() {
+		if (this.switchTimer) {
+			clearTimeout(this.switchTimer);
+			this.switchTimer = undefined;
 		}
+	}
+
+	/** 换会话结束（成功或失败）：清掉旧状态，把暂存的消息放回队列。 */
+	endSwitch() {
+		this.#clearSwitchTimer();
+		const deferred = this.deferred;
+		this.deferred = [];
+		this.switching = false;
+		this.reset();
 		if (deferred.length > 0) {
 			this.queue.push(...deferred);
 			this.log.info(`会话切换完成，恢复暂存的 ${deferred.length} 条消息`);
@@ -142,36 +178,73 @@ export class QqBridge {
 		}
 	}
 
-	clearPendingNew() {
-		this.pendingNew = undefined;
-	}
-
-	/** /qq new 失败：TUI 通知 + 尽力给 QQ 回一条失败提示。 */
-	notifyNewSessionFailed(reason) {
-		const pending = this.pendingNew;
+	/** 换会话失败：解除暂存，把消息放回队列，别把队列一起清了。 */
+	cancelSwitch() {
+		this.#clearSwitchTimer();
+		if (!this.switching) return;
 		const deferred = this.deferred;
-		this.pendingNew = undefined;
 		this.deferred = [];
+		this.switching = false;
 		if (deferred.length > 0) {
 			this.queue.push(...deferred);
+			this.log.info(`开新会话失败，放回暂存的 ${deferred.length} 条消息`);
 			void this.pump();
 		}
-		if (!pending) return;
-		this.log.warn(`开新会话失败：${reason}`);
-		this.notify(`开新会话失败：${reason}`, "warning");
-		const temp = { seqs: new Set(), attemptsLeft: 1 };
-		void this.api
-			.sendText(replyTarget(pending.item), `开新会话失败：${reason}`, {
-				msgId: pending.item.msgId,
-				msgSeq: this.#nextSeq(temp),
-			})
-			.catch((err) => this.log.warn(`失败提示发送失败：${err?.message ?? err}`));
+	}
+
+	/** 直接回一条纯文本（命令的答复），不走模型、不占队列。 */
+	async reply(item, text) {
+		if (this.stopped || !text) return;
+		const body = this.cfg.replyFormat === "markdown" ? String(text) : stripMarkdown(String(text));
+		const inflight = { seqs: new Set(), attemptsLeft: this.#replyQuota(item.kind), quotaMax: this.#replyQuota(item.kind) };
+		const chunks = chunkText(body, {
+			chunkChars: this.cfg.chunkChars,
+			maxChunks: Math.min(this.cfg.maxChunks, inflight.attemptsLeft),
+		});
+		for (const chunk of chunks) {
+			if (this.stopped) return;
+			try {
+				await this.#sendWithRetry(inflight, (seq) =>
+					this.api.sendText(replyTarget(item), chunk, { msgId: item.msgId, msgSeq: seq }),
+				);
+				this.stats.sent++;
+			} catch (err) {
+				this.stats.failed++;
+				this.log.warn(`命令回执发送失败：${err?.message ?? err}`);
+				return;
+			}
+		}
+	}
+
+	/** 命令处理：本模块不管具体命令，只负责「不喂模型」和回执。 */
+	async #runCommand(item, command) {
+		try {
+			const result = await this.onCommand?.(command, item);
+			if (!result) {
+				// 没有处理器：按普通消息处理
+				this.queue.push(item);
+				void this.pump();
+				return;
+			}
+			if (result.forward) {
+				// 技能/提示模板/其它插件的命令：交给 Pi 展开执行，算一次正常提问
+				item.expandTemplates = true;
+				this.queue.push(item);
+				void this.pump();
+				return;
+			}
+			await this.reply(item, result.text ?? "");
+		} catch (err) {
+			this.log.error(`命令执行失败：${err?.stack ?? err}`);
+			await this.reply(item, `命令执行失败：${err?.message ?? err}`).catch(() => {});
+		}
 	}
 
 	stop() {
 		this.stopped = true;
 		this.generation++;
-		this.pendingNew = undefined;
+		this.#clearSwitchTimer();
+		this.switching = false;
 		this.#clearTimers();
 		this.#stopTyping(this.inflight);
 		this.queue = [];
@@ -222,33 +295,31 @@ export class QqBridge {
 			this.log.warn(`未授权来源 ${logChat(item)}（kind=${item.kind} user=${maskId(item.userId)}），忽略`);
 			return { accepted: false, reason: "未授权" };
 		}
-		if (this.queue.length >= this.cfg.maxQueue) {
-			this.stats.ignored++;
-			this.log.warn(`队列已满（${this.cfg.maxQueue}），丢弃来自 ${logChat(item)} 的消息`);
-			return { accepted: false, reason: "队列已满" };
-		}
 		this.seen.set(item.msgId, Date.now());
 		this.lastByChat.set(chatKey(item), { msgId: item.msgId, at: item.receivedAt });
 
-		// QQ 侧 /qq new：不注入模型，交给 Pi 的扩展命令开新会话
-		// 正在切换会话：新消息留在暂存区，等 session_start(new) 后放回队列，避免被 reset 清掉
-		if (this.pendingNew) {
+		// 正在切换会话：新消息留在暂存区，等 session_start 后放回队列，避免被 reset 清掉
+		if (this.switching) {
 			this.deferred.push(item);
 			this.stats.received++;
 			this.log.info(`会话切换中，暂存消息 chat=${maskId(item.chatId)}（${this.deferred.length} 条）`);
 			return { accepted: true, deferred: true };
 		}
 
-		const command = /^\/qq\s+new(?:\s+(.*))?$/i.exec(item.text.trim());
-		if (command && typeof this.onNewSession === "function") {
-			this.log.info(`收到 /qq new（chat=${maskId(item.chatId)}）`);
-			this.pendingNew = { item, at: Date.now() };
-			try {
-				this.onNewSession?.(command[1] ?? "");
-			} catch (err) {
-				this.notifyNewSessionFailed(err?.message ?? String(err));
-			}
+		// 斜杠命令不喂模型：本插件或 Pi 的桌面命令自己处理（与终端里敲命令一致）。
+		// 放在队列上限判断之前——队列满的时候也应该能 /new、/model。
+		const command = parseCommand(item.text);
+		if (command) {
+			this.stats.received++;
+			this.log.info(`收到命令 /${command.name}（chat=${maskId(item.chatId)}）`);
+			void this.#runCommand(item, command);
 			return { accepted: true, handled: true };
+		}
+
+		if (this.queue.length >= this.cfg.maxQueue) {
+			this.stats.ignored++;
+			this.log.warn(`队列已满（${this.cfg.maxQueue}），丢弃来自 ${logChat(item)} 的消息`);
+			return { accepted: false, reason: "队列已满" };
 		}
 
 		this.queue.push(item);
@@ -366,7 +437,10 @@ export class QqBridge {
 	async #pumpOnce() {
 		const generation = this.generation;
 		const item = this.queue.shift();
-		const prompt = buildPrompt(item, this.cfg);
+		// 转发的斜杠命令必须保持「/开头且无信封头」，否则 Pi 不会展开技能/模板
+		const prompt = item.expandTemplates
+			? { text: String(item.text ?? ""), imageUrls: [] }
+			: buildPrompt(item, this.cfg);
 
 		let token = null;
 		try {
@@ -406,7 +480,7 @@ export class QqBridge {
 		if (generation !== this.generation) return;
 		try {
 			const content = images.length > 0 ? [{ type: "text", text: prompt.text }, ...images] : prompt.text;
-			this.pi.sendUserMessage(content);
+			this.pi.sendUserMessage(content, item.expandTemplates ? { expandPromptTemplates: true } : undefined);
 			this.log.info(`已注入 Pi（chat=${maskId(item.chatId)}，图片 ${images.length} 张）`);
 			// Pi 的 sendUserMessage 是 fire-and-forget，异步失败不会抛回来；靠看门狗兜底
 			this.#armInjectWatchdog(inflight);
@@ -660,12 +734,30 @@ export class QqBridge {
 		const reserveAck = 0;
 		const available = Math.max(0, inflight.attemptsLeft - reserveAck);
 		const wantText = body.length > 0 || parsed.files.length === 0;
+
+		// 长回答：先用「最多能发几段文字」判断有没有溢出，溢出就把全文落盘当附件发，
+		// 别像旧版那样把后半截直接丢掉。
+		let overflowed = false;
+		if (wantText && body && this.cfg.overflow === "file" && this.cfg.files?.enabled) {
+			const textCapacity = Math.max(1, Math.min(this.cfg.maxChunks, available - (parsed.files.length > 0 ? 1 : 0)));
+			const totalChunks = chunkText(body, { chunkChars: this.cfg.chunkChars, maxChunks: 999 }).length;
+			if (totalChunks > textCapacity) {
+				const file = await writeOverflowFile(body, this.cfg, this.log);
+				if (file) {
+					overflowed = true;
+					parsed.files.unshift(file);
+					this.log.info(`回答有 ${totalChunks} 段，超过 ${textCapacity} 段上限，全文已写入 ${file}`);
+				}
+			}
+		}
+
 		const filesToSend = parsed.files.slice(0, Math.max(0, Math.min(parsed.files.length, available - (wantText ? 1 : 0))));
 		const textSlots = wantText ? Math.max(0, available - filesToSend.length) : 0;
 		const chunks = textSlots > 0
 			? chunkText(body, {
 					chunkChars: this.cfg.chunkChars,
 					maxChunks: Math.min(this.cfg.maxChunks, textSlots),
+					overflowHint: overflowed ? "……（全文见附件）" : undefined,
 				})
 			: [];
 		if (chunks.length === 0 && filesToSend.length === 0) {

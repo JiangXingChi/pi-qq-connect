@@ -179,16 +179,12 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
 	});
 	await t.test("state.ctx 指向新会话上下文", () => assert.equal(state.ctx, firstCtx));
 
-	let switched = 0;
-	let cleared = 0;
+	let ended = 0;
 	let reset = 0;
 	state.bridge = {
 		pi: null,
-		onSessionSwitched: () => {
-			switched++;
-		},
-		clearPendingNew: () => {
-			cleared++;
+		endSwitch: () => {
+			ended++;
 		},
 		reset: () => {
 			reset++;
@@ -200,14 +196,13 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
 	await sleep(120);
 
 	await t.test("有桥时只切换、不重建", () => {
-		assert.equal(switched, 1);
+		assert.equal(ended, 1);
 		assert.equal(notifications.length, before, "不应再触发 start()");
 	});
 	await t.test("有桥时刷新 bridge.pi", () => assert.equal(state.bridge.pi, fake.pi));
 
 	await fake.emit("session_start", { reason: "resume" }, makeCtx());
-	await t.test("resume 时清掉待确认的 /qq new 并重置队列", () => {
-		assert.equal(cleared, 1);
+	await t.test("resume 时重置队列", () => {
 		assert.equal(reset, 1);
 		assert.equal(state.ctx, nextCtx);
 	});

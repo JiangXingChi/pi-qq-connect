@@ -27,6 +27,7 @@ import { QqGateway } from "./gateway.js";
 import { QqBridge, isStaleContextError } from "./session.js";
 import { acquireLock, readLock, releaseLock } from "./lock.js";
 import { maskId, normalizeEvent } from "./text.js";
+import { HELP_TEXT, TUI_ONLY, createCommandRunner } from "./commands.js";
 
 const SERVICE_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "pi-qq-connect.mjs");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,9 +65,11 @@ function newRuntime() {
 		bridge: undefined,
 		error: null,
 		starting: false,
+		registered: false,
 		lastInbound: undefined,
 		lockWatch: undefined,
-		newSessionTimer: undefined,
+		runner: undefined,
+		pendingExec: undefined,
 	};
 }
 
@@ -79,7 +82,6 @@ export function resetRuntimeForTests() {
 	shared.bridge?.stop();
 	shared.gateway?.stop();
 	if (shared.lockWatch) clearInterval(shared.lockWatch);
-	if (shared.newSessionTimer) clearTimeout(shared.newSessionTimer);
 	Object.assign(shared, newRuntime());
 }
 
@@ -87,6 +89,10 @@ export default function createExtension(pi) {
 	const state = shared;
 	state.extensionApi = pi;
 	if (state.bridge) state.bridge.pi = pi;
+	// 同一进程里被加载两次（例如自动发现 + 显式 --extension）时只注册一次，
+	// 否则命令与事件监听会重复，一条 QQ 消息会被回复两次。
+	if (state.registered) return state;
+	state.registered = true;
 
 	function setStatus(label, detail) {
 		const text = detail ? `QQ: ${label} · ${detail}` : `QQ: ${label}`;
@@ -124,9 +130,9 @@ export default function createExtension(pi) {
 			clearInterval(state.lockWatch);
 			state.lockWatch = undefined;
 		}
-		if (state.newSessionTimer) {
-			clearTimeout(state.newSessionTimer);
-			state.newSessionTimer = undefined;
+		if (state.pendingExec) {
+			state.pendingExec.done({ ok: false, message: "后台服务已停止" });
+			state.pendingExec = undefined;
 		}
 		try {
 			state.gateway?.stop();
@@ -139,7 +145,7 @@ export default function createExtension(pi) {
 		if (release && state.config?.lock !== false) releaseLock(lockFilePath());
 	}
 
-	/** 终端里 /qq new 直接切；失败只提示，不打断当前会话。 */
+	/** 开新会话：失败只提示，不打断当前会话；返回值给 QQ 侧回执用。 */
 	async function switchSession(ctx, name = "") {
 		const label = String(name ?? "").trim();
 		try {
@@ -152,38 +158,90 @@ export default function createExtension(pi) {
 					state.ctx = next;
 				},
 			});
-			if (result?.cancelled) notify("开新会话被取消", "warning");
+			if (result?.cancelled) {
+				notify("开新会话被取消", "warning");
+				return { ok: false, cancelled: true, message: "被取消" };
+			}
+			return { ok: true };
 		} catch (err) {
 			if (isStaleContextError(err)) {
 				// 旧句柄已失效：新会话其实已经开成，出问题的是桥
-				notify("开新会话失败：当前 pi 会话句柄已作废，请在终端 /qq stop 再 /qq start 重启后台服务", "warning");
-				return;
+				return { ok: false, message: "当前 pi 会话句柄已作废，请 /qq stop 再 /qq start 重启后台服务" };
 			}
-			notify(`开新会话失败：${err?.message ?? err}`, "warning");
+			return { ok: false, message: err?.message ?? String(err) };
 		}
 	}
 
-	/** 通过 Pi 的扩展命令通道开新会话：sendUserMessage 的 expandPromptTemplates 会执行 /qq new。 */
+	/**
+	 * 让 QQ 侧也能开新会话：ExtensionCommandContext.newSession 只能在命令处理器里调，
+	 * 所以借一句扩展命令 `/qq __new` 走过去，命令执行完直接把结果 resolve 回来——
+	 * 旧版是靠 15 秒轮询猜的，常常「假失败」。
+	 */
 	function requestNewSession(args = "") {
-		const text = args ? `/qq new ${args}` : "/qq new";
-		try {
-			state.extensionApi.sendUserMessage(text, { expandPromptTemplates: true });
-		} catch (err) {
-			if (isStaleContextError(err)) {
-				// 旧扩展实例的 pi 已失效：桥也不能再注入，直接收掉，别留一条吞消息的网关
-				state.bridge?.notifyNewSessionFailed("会话已切换，插件句柄已失效，请 /qq stop 再 /qq start 重启服务");
-				stop();
-				return;
-			}
-			state.bridge?.notifyNewSessionFailed(err?.message ?? String(err));
-			return;
+		if (state.pendingExec) {
+			// 连发两次 /new 时别互相踩：后一个直接拒绝，避免把前一个的暂存队列解开
+			return Promise.resolve({ ok: false, message: "上一个开新会话还在进行中，稍等一下" });
 		}
-		if (state.newSessionTimer) clearTimeout(state.newSessionTimer);
-		state.newSessionTimer = setTimeout(() => {
-			state.newSessionTimer = undefined;
-			state.bridge?.notifyNewSessionFailed("15 秒内没有切到新会话");
-		}, 15_000);
-		state.newSessionTimer.unref?.();
+		return new Promise((resolve) => {
+			let settled = false;
+			const done = (result) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				const owner = state.pendingExec?.done === done;
+				if (owner) state.pendingExec = undefined;
+				// 失败/超时时不会有 session_start，得自己把暂存队列放出来（只由发起者解开）
+				if (!result?.ok && owner) state.bridge?.cancelSwitch();
+				resolve(result);
+			};
+			const timer = setTimeout(() => done({ ok: false, message: "Pi 20 秒内没有响应（可能正忙）" }), 20_000);
+			timer.unref?.();
+			state.pendingExec = { done };
+			state.bridge?.beginSwitch();
+			try {
+				state.extensionApi.sendUserMessage(args ? `/qq __new ${args}` : "/qq __new", { expandPromptTemplates: true });
+			} catch (err) {
+				state.bridge?.cancelSwitch();
+				done({ ok: false, message: err?.message ?? String(err) });
+			}
+		});
+	}
+
+	/** QQ 里发来的斜杠命令：本插件处理 / 桌面命令 / 拒绝 TUI 专用命令 / 转发给 Pi。 */
+	async function handleCommand(command) {
+		if (command.name === "qq") return { text: handleQqSubcommand(command.args) };
+		const local = await state.runner?.run(command);
+		if (local !== null && local !== undefined) return { text: local };
+		if (TUI_ONLY.has(command.name)) {
+			return { text: `「/${command.name}」只能在终端里用。QQ 里可用：/new /model /thinking /compact /session /name /tools /help` };
+		}
+		let known = false;
+		try {
+			known = (state.extensionApi?.getCommands?.() ?? []).some((item) => item.name === command.name);
+		} catch {
+			known = false;
+		}
+		if (known) return { forward: true };
+		return { text: `不认识的命令 /${command.name}。发 /help 看 QQ 里能用的命令。` };
+	}
+
+	/** /qq 在 QQ 里只回放能纯文本回答的子命令，改机器状态的仍留给终端。 */
+	function handleQqSubcommand(args) {
+		const [sub, ...rest] = String(args ?? "").trim().split(/\s+/);
+		switch (sub || "status") {
+			case "status":
+				return statusReport();
+			case "log": {
+				const n = Number(rest[0]) > 0 ? Math.min(Number(rest[0]), 200) : 20;
+				return state.logger?.tail(n)?.join("\n") ?? "（没有日志）";
+			}
+			case "help":
+				return HELP_TEXT;
+			case "new":
+				return "「/qq new」已并入「/new」，直接发 /new 即可";
+			default:
+				return `「/qq ${sub}」要在终端里执行（会用终端切换到前后台服务）。QQ 里可用：/qq status、/qq log [n]`;
+		}
 	}
 
 	async function start(ctx, { keepLock = false } = {}) {
@@ -266,6 +324,12 @@ export default function createExtension(pi) {
 				log: state.logger,
 			});
 			const api = new QqApi({ auth, sandbox: config.sandbox, endpoints: config.endpoints, log: state.logger });
+			state.runner = createCommandRunner({
+				getPi: () => state.extensionApi,
+				getCtx: () => state.ctx,
+				newSession: (args) => requestNewSession(args),
+				notify,
+			});
 			const bridge = new QqBridge({
 				pi,
 				api,
@@ -273,7 +337,7 @@ export default function createExtension(pi) {
 				log: state.logger,
 				notify,
 				isOnline: () => state.gateway?.state === "connected",
-				onNewSession: (args) => requestNewSession(args),
+				onCommand: (command) => handleCommand(command),
 				onFatal: () => {
 					// 桥自己判定无法继续（通常是会话替换后句柄失效）：连网关一起收掉，避免静默吞消息
 					stop();
@@ -345,10 +409,28 @@ export default function createExtension(pi) {
 		}
 		try {
 			const sessionId = state.ctx?.sessionManager?.getSessionId?.();
-			if (sessionId) lines.push(`Pi 会话：${sessionId}`);
+			const name = state.extensionApi?.getSessionName?.();
+			if (sessionId) lines.push(`Pi 会话：${sessionId}${name ? ` · ${name}` : ""}`);
+			const model = state.ctx?.model ?? state.extensionApi?.model;
+			if (model) {
+				const provider = model.provider ?? "?";
+				const id = model.id ?? model.modelId ?? "?";
+				const thinking = state.extensionApi?.getThinkingLevel?.() ?? "unknown";
+				lines.push(`模型：${provider}/${id} · 思考 ${thinking}`);
+			}
+			const usage = state.ctx?.getContextUsage?.();
+			if (usage) {
+				const tokens = usage.tokens ?? usage.usedTokens;
+				const window = usage.contextWindow ?? usage.maxTokens;
+				const percent = Number.isFinite(usage.percent) ? `（${Math.round(usage.percent)}%）` : "";
+				lines.push(`上下文：${tokens ?? "?"} / ${window ?? "?"}${percent}`);
+			}
+			const tools = state.extensionApi?.getActiveTools?.() ?? [];
+			if (tools.length) lines.push(`工具：${tools.length} 个`);
 		} catch {
 			// ignore
 		}
+		lines.push(`扩展加载：${JSON.stringify(state.config?.extensions ?? "auto")}`);
 		return lines.join("\n");
 	}
 
@@ -357,7 +439,7 @@ export default function createExtension(pi) {
 		"  status      查看网关、队列、最近入站、后台服务",
 		"  start       启动后台常驻 pi（QQ 会话交给它）",
 		"  stop        停止后台服务；没有服务时断开本进程网关",
-		"  new [名称]  开一个新的 Pi 会话（QQ 里发 /qq new 也可）",
+		"  （开新会话直接用 /new；/qq new 仍可用，是同一条路径）",
 		"  log [n]     看最近 n 条日志（默认 20）",
 		"  take        仅锁冲突时：强制接管网关锁（对方 30 秒内自停）",
 	].join("\n");
@@ -451,7 +533,7 @@ export default function createExtension(pi) {
 	}
 
 	pi.registerCommand("qq", {
-		description: "QQ 机器人：status / start / stop / new / log / take",
+		description: "QQ 机器人：status / start / stop / log / take（/new 请直接用 /new）",
 		handler: async (args, ctx) => {
 			state.ctx = ctx;
 			const [sub, ...rest] = String(args ?? "").trim().split(/\s+/);
@@ -466,13 +548,27 @@ export default function createExtension(pi) {
 					await stopBackground(rest.includes("--force"));
 					return;
 				case "new": {
+					// 0.4.0 起 /new 是唯一入口，这里保留成别名，行为完全一样
 					const svc = readServiceState(serviceStatePath(baseDir()));
 					if (svc && isServiceAlive(svc) && !isServiceProcess(svc)) {
-						notify("后台服务在线：QQ 会话由服务管理，请在 QQ 里发 /qq new；终端 /new 只切本地 TUI", "warning");
+						notify("后台服务在线：QQ 会话由服务管理，请在 QQ 里发 /new；终端 /new 只切本地 TUI", "warning");
 						return;
 					}
 					notify("正在开新会话…", "info");
-					await switchSession(ctx, rest.join(" "));
+					const result = await switchSession(ctx, rest.join(" "));
+					if (!result.ok) notify(`开新会话失败：${result.message ?? "未知原因"}`, "warning");
+					return;
+				}
+				case "__new": {
+					// QQ 侧 /new 的内部通道：结果直接 resolve 给发起者，不再靠轮询猜
+					const pending = state.pendingExec;
+					if (!pending) {
+						notify("没有等待中的开新会话请求", "warning");
+						return;
+					}
+					notify("正在开新会话…", "info");
+					const result = await switchSession(ctx, rest.join(" "));
+					pending.done(result);
 					return;
 				}
 				case "log": {
@@ -511,10 +607,6 @@ export default function createExtension(pi) {
 
 		// /new /resume /fork 只是换了 Pi 会话：网关、锁保留
 		if (["new", "resume", "fork"].includes(event?.reason)) {
-			if (state.newSessionTimer) {
-				clearTimeout(state.newSessionTimer);
-				state.newSessionTimer = undefined;
-			}
 			if (!state.bridge) {
 				// 没有活动桥（上一个实例的自己停了 / 被回收）：直接重建，别留一条没人管的网关
 				notify(`会话已切换（${event.reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
@@ -522,10 +614,9 @@ export default function createExtension(pi) {
 				return;
 			}
 			if (event.reason === "new") {
-				void state.bridge?.onSessionSwitched();
+				state.bridge?.endSwitch();
 			} else {
-				// 手动 resume/fork：丢掉旧队列与待确认的 /qq new，但不发「已开新会话」
-				state.bridge?.clearPendingNew();
+				// 手动 resume/fork：丢掉旧队列，重新开始
 				state.bridge?.reset();
 			}
 			return;

@@ -41,18 +41,20 @@ openid to `allowUsers` and turn `allowAll` off.
 | `/qq status` | gateway, queue, last inbound, background service |
 | `/qq start` | start the detached service |
 | `/qq stop` | stop the service (or disconnect this process) |
-| `/qq new [name]` | new Pi session, gateway stays connected (also works from QQ) |
+| `/new [name]` | new Pi session, gateway stays connected (same as the terminal) |
+| `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help` | the desktop commands, answered in QQ |
 | `/qq log [n]` | tail the log |
 | `/qq take` | take over the gateway lock (only on lock conflicts) |
 
-When the background service is online, terminal `/qq new` is refused (use it from QQ); terminal
+When the background service is online, terminal `/qq new` is refused (use `/new` from QQ); terminal
 `/new` only changes the local TUI session. The QQ session belongs to the service process.
 
 ## Limits
 
 - Passive replies only: 4 per message in private chat (60 min window), 5 per message in groups
   (5 min window).
-- One shared Pi session for all QQ chats, unless you send `/qq new`.
+- One shared Pi session for all QQ chats, unless you send `/new`.
+- `extensions: "auto"` (default): the service launches `pi` without `--no-extensions`, so QQ loads exactly what the terminal loads (built-ins included).
 - File uploads are validated (regular file, <= 200 MB, sensitive paths such as `~/.ssh` denied).
 
 ## Development

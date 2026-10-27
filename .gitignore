@@ -7,3 +7,6 @@ node_modules/
 sessions/
 test/tmp-*
 .pi/
+
+# 本地任务计划（不随仓库发布）
+PLAN.md

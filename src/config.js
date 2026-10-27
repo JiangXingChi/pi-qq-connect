@@ -43,6 +43,16 @@ export const DEFAULT_CONFIG = Object.freeze({
 	images: { enabled: true, maxCount: 2, maxBytes: 8 * 1024 * 1024 },
 	files: { enabled: true, maxCount: 3, maxBytes: 200 * 1024 * 1024, allowDirs: [] },
 	lock: true,
+	// 后台服务加载哪些 Pi 插件：
+	//   "auto"（默认）交给 pi 自己发现，和终端完全一致（内置扩展、settings、本地/项目扩展、技能…）
+	//   "none" 只加载自身（隔离模式）
+	//   数组   只挂这些（名字或绝对路径），可写 builtin:tool-search 这类内置扩展
+	//   "all"  0.3.0 的旧值，等价于 "auto"
+	extensions: "auto",
+	// 回答长度超过分片上限时："file" 把完整回答写成文件发出去 / "truncate" 只发前几段（旧行为）
+	overflow: "file",
+	// overflow=file 时完整回答的落盘目录
+	replyDir: "~/.pi/agent/qq-replies",
 	log: { file: "~/.pi/agent/pi-qq-connect.log", level: "info", maxBytes: 2 * 1024 * 1024 },
 	endpoints: { token: "", api: "", gateway: "" },
 });
@@ -74,6 +84,14 @@ function boolIn(value, fallback) {
 	if (value === "true" || value === 1) return true;
 	if (value === "false" || value === 0) return false;
 	return fallback;
+}
+
+/** 非法值一律退回 "auto"，不要让一个打错的字段把插件全关掉。 */
+function normalizeExtensions(value) {
+	if (value === "all") return "auto"; // 0.3.0 旧值
+	if (value === "auto" || value === "none") return value;
+	if (Array.isArray(value)) return strList(value);
+	return DEFAULT_CONFIG.extensions;
 }
 
 function intIn(value, fallback, min, max) {
@@ -140,6 +158,9 @@ export function normalizeConfig(raw = {}) {
 		cfg.files.allowDirs = [];
 	}
 	cfg.lock = boolIn(raw.lock, true);
+	cfg.extensions = normalizeExtensions(cfg.extensions);
+	cfg.overflow = cfg.overflow === "truncate" ? "truncate" : "file";
+	cfg.replyDir = expandHome(typeof cfg.replyDir === "string" && cfg.replyDir ? cfg.replyDir : DEFAULT_CONFIG.replyDir);
 	cfg.log = mergeSection(DEFAULT_CONFIG.log, cfg.log);
 	if (!LEVELS.has(cfg.log.level)) cfg.log.level = "info";
 	cfg.log.file = expandHome(cfg.log.file || DEFAULT_CONFIG.log.file);

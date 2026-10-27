@@ -1,7 +1,7 @@
 {
   "name": "pi-qq-connect",
-  "version": "0.2.9",
-  "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻",
+  "version": "0.4.0",
+  "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
   "type": "module",
   "license": "MIT",
   "author": "JiangXingChi",
@@ -48,7 +48,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "node --test test/unit.test.mjs test/media.test.mjs test/stale-session.test.mjs",
+    "test": "node --test test/",
     "e2e": "node test/e2e.mjs",
     "e2e:service": "node test/e2e-service.mjs",
     "e2e:service-cmd": "node test/e2e-service-cmd.mjs",
