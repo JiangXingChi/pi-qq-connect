@@ -140,7 +140,7 @@ Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再�
 
 ## 测试
 
-- `npm test`：148 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话接棒/切换回归。
+- `npm test`：150 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话接棒/切换回归。
 - `npm run e2e`：真 `pi --mode rpc` + mock QQ，调两次模型；断言 `/new` 后新会话能继续对话、QQ 侧与 pi 命令通道都仍可用、日志无 stale/无 30 秒看门狗（回执耗时只打印，不作门槛）。
-- `test/dual-load.test.mjs`：真 pi 同时「自动发现 + 显式 -e」加载同一份插件，断言只有一个负责人、`/qq` 只回一次。
+- `test/dual-load.test.mjs`：把插件复制成两份显式加载（真 pi），断言只有一个负责人、`/qq` 只回一次；本机没有 `pi` 时自动 skip。
 - `npm run e2e:service` / `e2e:service-cmd`：后台服务生命周期与 `/qq start|stop`。

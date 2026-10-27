@@ -39,7 +39,7 @@
 ## 命令
 
 ```bash
-npm test                  # node --test test/：148 项，单测 + mock 平台集成，十来秒
+npm test                  # node --test test/：150 项，单测 + mock 平台集成，十来秒
 npm run e2e               # 真 pi --mode rpc + mock QQ，会调两次模型
 npm run e2e:service       # 后台服务进程，不调模型
 npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop，不调模型
@@ -67,28 +67,32 @@ systemctl --user restart pi-qq-connect.service          # ExecStart 指向本目
 
 1. **零运行时依赖**：不要引入 npm 包。HTTP 用 `fetch`，WebSocket 用全局 `WebSocket`，
    加密用 `node:crypto`。依赖会让扩展在 `pi install` 之外无法加载。
-2. **不要改软链指向**：`~/.pi/agent/extensions/pi-qq-connect` 永远指向正式目录
-   `~/Agent/Core/系统/智能设定/Pi插件/pi-qq-connect`。测试用 `--extension`，发布用 `scripts/publish-to-core.sh`。
+2. **只保留一种安装形态**：`pi install` 的包（或 `-e <本目录>`）。不要再手工软链到别处，
+   同一份插件被加载两次时要靠入口的实例去重与会话选举兜住（见第 11 条）。
 3. **凭据不进仓库**：AppID/AppSecret 只在 `~/.pi/agent/pi-qq-connect.json`（0600）。
-   代码、文档、测试、日志里都不许出现真实值。
+   代码、文档、测试、日志里都不许出现真实值；AppID 输出走 `maskAppId()`，媒体 URL 走 `maskUrl()`。
 4. **发布前 `npm test` 必须全过**；改了网关/发送/协议要额外 `npm run e2e`。
 5. **启动参数默认与终端一致**（0.4.0 起）：`extensions: "auto"` 时不加 `--no-extensions`、
    不自己枚举 `pi list`。要加参数先想清楚会不会让 QQ 和终端加载的东西不一样。
 6. **斜杠命令不进模型**：`parseCommand()` 命中就必须走 `onCommand` 分支（回执/转发/拒绝），
-   任何情况下都不能把 `/xxx` 当普通提问注入。
-7. **换会话要先 `beginSwitch()`**，并且超时/失败一定 `cancelSwitch()`，否则消息会卡在 `deferred`。
+   任何情况下都不能把 `/xxx` 当普通提问注入。`#pumpOnce` 里有一道兜底，别删。
+7. **换会话要先 `beginSwitch()`**（可重复调用，只续看门狗、不清暂存）；**纯失败**（被取消、报错、
+   超时且没收到 `session_shutdown`）必须立刻 `cancelSwitch()`；已经收到 `session_shutdown`
+   的交给 30 秒看门狗与新实例接棒，别把马上要完成的切换判死。
 8. **`bin` 必须持续排空 stdout**：`pi --mode rpc` 的 stdout 一旦没人读，管道写满会把 pi 卡死；
    对话框请求也要在启动器里应答（当前策略：回 `cancelled` 并记日志）。
-5. **协议事实以 `docs/PLAN.md` 为准**：intents `1<<25`、被动回复窗口（群 5min / 单聊 60min）、
+9. **协议事实以 `docs/PLAN.md` 为准**：intents `1<<25`、被动回复窗口（群 5min / 单聊 60min）、
    单聊每条最多 4 次 / 群 5 次、`msg_id+msg_seq` 去重、媒体 CDN 要带 `Authorization: QQBot <token>`，
    否则 403。改这些之前先补测试。
-6. **QQ 侧 `/new` 的实现方式不能换**：必须走内部命令
-   `pi.sendUserMessage("/qq __new", { expandPromptTemplates: true })` 让 Pi 派发扩展命令，
-   handler 里 `ctx.newSession()`（`/qq new` 只是 QQ 侧的改名提示，不再切会话）。
-   不要缓存旧 `ctx` 直接调——`newSession` 返回后旧 ctx 与旧 `pi` 句柄都立刻失效。
-7. **换会话会重跑扩展工厂**：网关、队列、锁状态必须存在 `globalThis[Symbol.for(...)]` 单例里，
-   否则 `/new` 之后会多连一条网关、多抢一次锁。
-8. **测试不连真 QQ**：全部用 `test/mock-qq.mjs`。`npm run e2e` 会花两次模型调用，别在循环里跑。
+10. **QQ 侧 `/new` 的实现方式不能换**：必须走内部命令
+    `pi.sendUserMessage("/qq __new", { expandPromptTemplates: true })` 让 Pi 派发扩展命令，
+    handler 里 `ctx.newSession()`（`/qq new` 只是 QQ 侧的改名提示，不再切会话）。
+    不要缓存旧 `ctx` 直接调——`newSession` 返回后旧 ctx 与旧 `pi` 句柄都立刻失效。
+11. **换会话会重跑扩展工厂**：网关、队列、锁状态必须存在 `globalThis[Symbol.for(...)]` 单例里，
+    否则 `/new` 之后会多连一条网关、多抢一次锁。事件按实例注册，命令每个会话由选中的负责人注册一次
+    （同名命令注册两次会让 pi「谁都别执行」）。
+12. **测试不连真 QQ**：全部用 `test/mock-qq.mjs`。`npm run e2e` 会花两次模型调用，别在循环里跑。
+    `test/dual-load.test.mjs` 需要本机有 `pi`，没有时自动 skip。
 
 ## 常见改动入口
 
@@ -103,7 +107,7 @@ systemctl --user restart pi-qq-connect.service          # ExecStart 指向本目
 
 ## 完成标准
 
-- `npm test` 全过（当前 148 项），无挂起、无未捕获 rejection。
+- `npm test` 全过（当前 150 项），无挂起、无未捕获 rejection。
 - 触及协议/网关/发送/会话切换时：`npm run e2e` 通过（pong → `/new` → 新会话继续对话）。
 - 触及服务模式时：`npm run e2e:service` 与 `e2e:service-cmd` 通过。
 - `./scripts/publish-to-core.sh` 预览里的差异与本次改动一致，没有意外删除。

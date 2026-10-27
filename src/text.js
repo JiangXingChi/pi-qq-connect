@@ -269,6 +269,13 @@ export function buildPrompt(item, cfg) {
 	return { text: lines.join("\n"), imageUrls };
 }
 
+/** AppID 是 9~10 位数字；maskId 对短 ID 不掩码，这里单独处理。 */
+export function maskAppId(id) {
+	const text = String(id ?? "");
+	if (text.length <= 6) return "***";
+	return `${text.slice(0, 4)}***${text.slice(-3)}`;
+}
+
 export function replyTarget(item, msgIdOverride) {
 	return {
 		type: item.kind === "group" ? "group" : "private",

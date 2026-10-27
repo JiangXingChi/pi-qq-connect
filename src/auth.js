@@ -4,6 +4,8 @@
  *      body { appId, clientSecret } → { access_token, expires_in }（expires_in 是字符串）
  */
 
+import { maskAppId } from "./text.js";
+
 const DEFAULT_TOKEN_URL = "https://api.bot.qq.com/app/getAppAccessToken";
 const REFRESH_MARGIN_MS = 60_000;
 
@@ -36,9 +38,7 @@ export class QqAuth {
 
 	/** 供日志使用的脱敏版本 */
 	describe() {
-		const id = String(this.appId ?? "");
-		const masked = id.length <= 6 ? "***" : `${id.slice(0, 4)}***${id.slice(-3)}`;
-		return `appId=${masked} token=${this.token ? "cached" : "none"}`;
+		return `appId=${maskAppId(this.appId)} token=${this.token ? "cached" : "none"}`;
 	}
 
 	async #fetchToken() {

@@ -1,13 +1,12 @@
 /**
  * 双实例加载回归（真 pi，不连网关）。
  *
- * 部署形态：包被 `pi install` 进 settings（自动发现），后台服务又用
- * `--extension <同一目录>` 显式加载。pi 会给两个不同的 `pi` 对象、同一个 `ctx`。
- * 必须做到：
- *   1. 只由一个实例负责：启动提示（enabled=false）只出现一次；
+ * 把同一份插件复制成两个目录，用 `-e A -e B` 显式加载两份（不依赖本机装了哪些包）：
+ * pi 会给两个不同的 `pi` 对象、同一个 `ctx`。必须做到：
+ *   1. 只有一个负责人：启动提示（enabled=false）只出现一次；
  *   2. `/qq` 命令只注册一次——同名命令注册两次时 pi 的后果是「谁都别执行」。
  *
- * 跑法：node test/dual-load.test.mjs（会起一个真 pi 子进程，不调用模型）
+ * 没有 `pi` 可执行文件时自动跳过（`npm test` 在纯 Node 环境里仍可跑）。
  */
 
 import assert from "node:assert/strict";
@@ -15,23 +14,42 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+function hasPi() {
+	try {
+		execFileSync("pi", ["--version"], { stdio: "ignore", timeout: 20_000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 test("双实例加载：只一个负责人、命令只注册一次", async (t) => {
+	if (!hasPi()) {
+		t.skip("本机没有 pi 可执行文件，跳过双实例加载用例");
+		return;
+	}
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-dup-"));
+	// 把插件复制成第二份，确保真的是两个模块实例（不是同一路径被去重）
+	const copy = path.join(dir, "pkg-b");
+	fs.mkdirSync(copy, { recursive: true });
+	for (const entry of ["index.js", "package.json", "src"]) {
+		fs.cpSync(path.join(root, entry), path.join(copy, entry), { recursive: true });
+	}
 	const agentDir = path.join(dir, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
-	fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: [root] }, null, 2));
 	const configPath = path.join(dir, "config.json");
 	fs.writeFileSync(
 		configPath,
 		JSON.stringify({ enabled: false, appId: "1234567890", clientSecret: "x", sandbox: true, allowAll: true }),
 	);
 
-	const child = spawn("pi", ["--mode", "rpc", "--no-session", "-e", root], {
+	const child = spawn("pi", ["--mode", "rpc", "--no-session", "-e", root, "-e", copy], {
 		cwd: dir,
 		stdio: ["pipe", "pipe", "pipe"],
 		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PIQQCONNECT_CONFIG: configPath },
@@ -40,6 +58,7 @@ test("双实例加载：只一个负责人、命令只注册一次", async (t) =
 	let stderr = "";
 	child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
 	child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+	child.on("error", (err) => (stderr += String(err?.message ?? err)));
 
 	const until = async (check, label, timeoutMs = 20_000) => {
 		const deadline = Date.now() + timeoutMs;

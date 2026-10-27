@@ -128,8 +128,9 @@ try {
 
 	// 换会话后 pi 自己的命令通道也必须仍可用：走 RPC prompt 才真正用到 pi.registerCommand
 	// （QQ 侧的 /qq 由桥直接处理，绕过了命令注册，测不出 0.4.0 那个 bug）
+	const rpcMark = rpcOut.length;
 	child.stdin.write(JSON.stringify({ id: "e2e-cmd-1", type: "prompt", message: "/qq status" }) + "\n");
-	await until(() => /配置：/.test(rpcOut), "换会话后 pi 命令通道可用");
+	await until(() => /配置：/.test(rpcOut.slice(rpcMark)), "换会话后 pi 命令通道可用");
 	console.log("✔ 换会话后 pi 命令通道可用（/qq 重新注册成功）");
 	const logText = safeLog();
 	if (/stale after session replacement/i.test(logText)) throw new Error("换会话后出现 stale 报错");

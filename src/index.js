@@ -26,7 +26,7 @@ import { QqApi } from "./api.js";
 import { QqGateway } from "./gateway.js";
 import { QqBridge, isStaleContextError } from "./session.js";
 import { acquireLock, readLock, releaseLock } from "./lock.js";
-import { maskId, normalizeEvent } from "./text.js";
+import { maskAppId, maskId, normalizeEvent } from "./text.js";
 import { HELP_TEXT, TUI_ONLY, createCommandRunner } from "./commands.js";
 
 const SERVICE_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "pi-qq-connect.mjs");
@@ -42,13 +42,6 @@ function baseDir() {
  */
 export function shouldCancelSwitch({ ok, owner, sawShutdown }) {
 	return !ok && owner && !sawShutdown;
-}
-
-/** AppID 是 9~10 位数字，maskId 对短 ID 不掩码，这里单独处理。 */
-function maskAppId(id) {
-	const text = String(id ?? "");
-	if (text.length <= 6) return "***";
-	return `${text.slice(0, 4)}***${text.slice(-3)}`;
 }
 
 function lockFilePath() {
@@ -112,6 +105,9 @@ export default function createExtension(pi) {
 	// 桥只能在 30 秒看门狗超时后误判「桥失效」。
 	state.extensionApi = pi;
 	if (state.bridge) state.bridge.pi = pi;
+	// 换会话后旧负责人的句柄已死：新工厂一跑就先把事件接管过来，
+	// 万一 pi 没给 session_start，也不至于所有回答都被守卫丢掉
+	if (state.ownerStale) state.owner = pi;
 	// 同一个对象被加载两次（自动发现 + 显式 --extension 命中同一路径）：别再注册一遍
 	const seen = (state.seenInstances ??= new WeakSet());
 	if (seen.has(pi)) return state;
@@ -745,4 +741,5 @@ export default function createExtension(pi) {
 }
 
 // 方便测试
-export { lockFilePath, maskAppId };
+export { lockFilePath };
+export { maskAppId } from "./text.js";

@@ -418,6 +418,42 @@ test("T18 日志脱敏辅助函数", async (t) => {
 	await t.test("非法 URL 不抛", () => assert.equal(maskUrl("not a url"), "（无效 URL）"));
 });
 
+test("T19 adopt 会补跑暂停期间留在 deferred 里的命令", async () => {
+	const handled = [];
+	const { bridge, injected } = makeBridge({ onCommand: (command) => (handled.push(command), { text: "ok" }) });
+	bridge.stale = true; // 模拟「旧句柄已死、新实例还没来」
+	bridge.beginSwitch();
+	bridge.enqueue(item("c1", "/help"));
+	bridge.cancelSwitch(); // #restore 在 stale 下把命令留在 deferred
+	assert.equal(bridge.deferred.length, 1, "暂停期间命令要留着");
+	bridge.adopt({ sendUserMessage() {} });
+	await waitFor(() => handled.length === 1, { label: "接棒后补跑命令" });
+	assert.equal(bridge.deferred.length, 0);
+	assert.equal(injected.length, 0, "命令不能进模型");
+	bridge.stop();
+});
+
+test("T20 换会话后工厂先接管，即使没有 session_start 也不丢回答", async () => {
+	resetRuntimeForTests();
+	const first = createFakePi();
+	const state = mod.default(first.pi);
+	await first.emit("session_start", { reason: "startup" }, fakeCtx());
+	const bridge = trackingBridge(first.pi);
+	bridge.onMessageEnd = () => {};
+	state.bridge = bridge;
+
+	await first.emit("session_shutdown", { reason: "new" });
+	const second = createFakePi();
+	mod.default(second.pi); // 工厂跑了，但（假设）pi 没给 session_start
+	assert.equal(state.owner, second.pi, "新实例应当先接管事件");
+
+	const events = [];
+	bridge.onMessageEnd = () => events.push(1);
+	await second.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "x" }] } }, fakeCtx());
+	assert.equal(events.length, 1, "回答必须还能被收回来");
+	state.bridge = undefined;
+});
+
 test("T14 同一会话重复加载时命令只注册一次", async (t) => {
 	resetRuntimeForTests();
 	const first = createFakePi();

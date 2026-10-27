@@ -120,6 +120,7 @@ export class QqBridge {
 		this.pumping = false;
 		this.injecting = false;
 		this.restoring = false;
+		this.restoreToken = 0;
 		this.injectTimeoutMs = injectTimeoutMs;
 		this.stale = false;
 		this.retryCount = 0;
@@ -151,6 +152,9 @@ export class QqBridge {
 	/** 换会话/重建时清掉进行中的状态；排队消息由调用方（endSwitch）另行放回。 */
 	reset() {
 		this.generation++;
+		this.restoreToken = (this.restoreToken ?? 0) + 1;
+		this.restoring = false;
+		this.restoreToken = 0;
 		this.retryCount = 0;
 		this.#clearTimers();
 		this.#stopTyping(this.inflight);
@@ -172,6 +176,12 @@ export class QqBridge {
 		this.retryCount = 0;
 		this.injecting = false;
 		this.log.info(`新会话实例已接管 QQ 桥，积压 ${this.queue.length} 条消息待处理`);
+		// 暂停期间 #restore 把命令留在 deferred 里，接棒后要放出来（否则要等下一次换会话）
+		if (!this.switching && this.deferred.length > 0) {
+			const rest = this.deferred;
+			this.deferred = [];
+			this.#restore(rest, "接棒恢复");
+		}
 	}
 
 	/**
@@ -263,6 +273,7 @@ export class QqBridge {
 		// 命令按顺序补跑完再泵消息：否则 /model、/compact 可能落到刚注入的提问之后。
 		// restoring 期间挡住了其它 pump() 触发点（enqueue、agent_settled 等）。
 		this.log.info(`${label}，补跑 ${commands.length} 条命令`);
+		const token = (this.restoreToken = (this.restoreToken ?? 0) + 1);
 		this.restoring = true;
 		void (async () => {
 			try {
@@ -284,8 +295,12 @@ export class QqBridge {
 			} catch (err) {
 				this.log.error(`补跑命令异常：${err?.stack ?? err}`);
 			} finally {
-				this.restoring = false;
-				void this.pump();
+				// 期间可能又发生了一次 #restore/reset：只有最后一次才有资格放开泵
+				if (token === this.restoreToken) {
+					this.restoring = false;
+		this.restoreToken = 0;
+					void this.pump();
+				}
 			}
 		})();
 	}
@@ -319,9 +334,9 @@ export class QqBridge {
 		try {
 			const result = await this.onCommand?.(command, item);
 			if (!result) {
-				// 没有处理器：按普通消息处理
-				this.queue.push(item);
-				void this.pump();
+				// 没有处理器：命令不能当提问喂模型，也不能再塞回队列（会和 #pumpOnce 的兜底合成活锁）
+				this.stats.ignored++;
+				this.log.warn(`命令 /${command.name} 没有处理器，已丢弃`);
 				return;
 			}
 			if (result.forward) {
