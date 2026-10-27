@@ -37,7 +37,7 @@
 ## 命令
 
 ```bash
-npm test                  # node --test test/：93 项，单测 + mock 平台集成，十来秒
+npm test                  # node --test test/：131 项，单测 + mock 平台集成，十来秒
 npm run e2e               # 真 pi --mode rpc + mock QQ，会调一次模型
 npm run e2e:service       # 后台服务进程，不调模型
 npm run e2e:service-cmd   # 真 pi 里执行 /qq start|stop，不调模型
@@ -100,8 +100,8 @@ systemctl --user restart pi-qq-connect.service          # ExecStart 指向本目
 
 ## 完成标准
 
-- `npm test` 全过（当前 64 项），无挂起、无未捕获 rejection。
-- 触及协议/网关/发送/会话切换时：`npm run e2e` 通过（pong → `/qq new` → 新会话继续对话）。
+- `npm test` 全过（当前 131 项），无挂起、无未捕获 rejection。
+- 触及协议/网关/发送/会话切换时：`npm run e2e` 通过（pong → `/new` → 新会话继续对话）。
 - 触及服务模式时：`npm run e2e:service` 与 `e2e:service-cmd` 通过。
 - `./scripts/publish-to-core.sh` 预览里的差异与本次改动一致，没有意外删除。
 - `npm pack --dry-run` 的文件清单只包含运行必需文件（无凭据、无日志、无 `.git`）。

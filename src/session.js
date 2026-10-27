@@ -23,6 +23,15 @@ export function isStaleContextError(err) {
 	return /stale after session replacement or reload/i.test(String(err?.message ?? err ?? ""));
 }
 
+/** QQ 多媒体 URL 带 appid/fileid/rkey，日志里只留主机名。 */
+function maskUrl(url) {
+	try {
+		return new URL(url).origin;
+	} catch {
+		return "（无效 URL）";
+	}
+}
+
 function logChat(item) {
 	return `${item.kind}:${maskId(item.chatId)}`;
 }
@@ -91,7 +100,7 @@ export async function writeOverflowFile(body, cfg, log) {
 }
 
 export class QqBridge {
-	constructor({ pi, api, config, log, notify, isOnline, onCommand, onFatal, injectTimeoutMs = 5000 }) {
+	constructor({ pi, api, config, log, notify, isOnline, onCommand, injectTimeoutMs = 5000 }) {
 		this.pi = pi;
 		this.api = api;
 		this.cfg = config;
@@ -106,8 +115,8 @@ export class QqBridge {
 		this.pumping = false;
 		this.injecting = false;
 		this.injectTimeoutMs = injectTimeoutMs;
-		this.onFatal = onFatal;
-		this.staleReported = false;
+		this.stale = false;
+		this.retryCount = 0;
 		this.stopped = false;
 		this.seen = new Map();
 		this.lastByChat = new Map();
@@ -125,14 +134,16 @@ export class QqBridge {
 		return {
 			queue: this.queue.length,
 			busy: this.running,
+			stale: this.stale,
 			inflight: this.inflight ? { chat: chatKey(this.inflight.item), texts: this.inflight.texts.length } : null,
 			stats: { ...this.stats },
 		};
 	}
 
-	/** 换会话/重建时清空队列与进行中的状态。 */
+	/** 换会话/重建时清掉进行中的状态；排队消息由调用方（endSwitch）另行放回。 */
 	reset() {
 		this.generation++;
+		this.retryCount = 0;
 		this.#clearTimers();
 		this.#stopTyping(this.inflight);
 		this.queue = [];
@@ -142,12 +153,31 @@ export class QqBridge {
 		this.injecting = false;
 	}
 
-	/** 换会话开始：期间到达的消息先暂存，等 session_start 之后再放回队列。 */
+	/**
+	 * 新会话实例接棒：pi 每换会话都会重跑扩展工厂、换一个 pi 句柄，旧句柄随即作废。
+	 * 这里把旧句柄换掉；如果之前因为等不到接手而暂停，顺便解除暂停。
+	 */
+	adopt(pi) {
+		if (pi) this.pi = pi;
+		if (!this.stale) return;
+		this.stale = false;
+		this.retryCount = 0;
+		this.injecting = false;
+		this.log.info(`新会话实例已接管 QQ 桥，积压 ${this.queue.length} 条消息待处理`);
+	}
+
+	/**
+	 * 换会话开始：期间到达的消息先暂存，等 session_start 之后再放回队列。
+	 * 可重复调用（QQ 侧 /new 会先调一次，session_shutdown 再调一次）：
+	 * 已经在切换中时只续看门狗，绝不清空已暂存的消息。
+	 */
 	beginSwitch() {
-		this.switching = true;
-		this.deferred = [];
-		// 兜底：Pi 没给 session_start（拒绝/报错/被打断）时不能一直暂存消息
+		if (!this.switching) {
+			this.switching = true;
+			this.deferred = [];
+		}
 		if (this.switchTimer) clearTimeout(this.switchTimer);
+		// 兜底：Pi 没给 session_start（拒绝/报错/被打断）时不能一直暂存消息
 		this.switchTimer = setTimeout(() => {
 			this.switchTimer = undefined;
 			if (!this.switching) return;
@@ -164,18 +194,22 @@ export class QqBridge {
 		}
 	}
 
-	/** 换会话结束（成功或失败）：清掉旧状态，把暂存的消息放回队列。 */
+	/**
+	 * 换会话完成：保留排队消息与暂存消息，丢掉属于旧会话的在途回答。
+	 * 已经注入旧会话的那条没办法重放（模型可能已经动过手），只记一条日志。
+	 */
 	endSwitch() {
 		this.#clearSwitchTimer();
 		const deferred = this.deferred;
+		const inflight = this.inflight;
+		const kept = this.queue;
 		this.deferred = [];
 		this.switching = false;
 		this.reset();
-		if (deferred.length > 0) {
-			this.queue.push(...deferred);
-			this.log.info(`会话切换完成，恢复暂存的 ${deferred.length} 条消息`);
-			void this.pump();
+		if (inflight) {
+			this.log.warn(`会话切换时有一条消息正在生成回答，该回答随旧会话丢弃（chat=${maskId(inflight.item.chatId)}）`);
 		}
+		this.#restore([...kept, ...deferred], "会话切换完成");
 	}
 
 	/** 换会话失败：解除暂存，把消息放回队列，别把队列一起清了。 */
@@ -185,11 +219,53 @@ export class QqBridge {
 		const deferred = this.deferred;
 		this.deferred = [];
 		this.switching = false;
-		if (deferred.length > 0) {
-			this.queue.push(...deferred);
-			this.log.info(`开新会话失败，放回暂存的 ${deferred.length} 条消息`);
-			void this.pump();
+		this.#restore(deferred, "开新会话失败");
+	}
+
+	/**
+	 * 把暂存/排队过的消息放回桥里。
+	 * 斜杠命令在暂存期间没法执行（旧句柄已死），这里重新解析一遍交给命令通道，
+	 * 绝不当作普通提问喂给模型（AGENTS.md：斜杠命令不进模型）。
+	 */
+	#restore(items, label) {
+		if (items.length === 0) return;
+		const commands = [];
+		let queued = 0;
+		for (const item of items) {
+			const command = parseCommand(item.text);
+			if (command) {
+				commands.push({ item, command });
+				continue;
+			}
+			if (this.queue.length >= this.cfg.maxQueue) {
+				this.stats.ignored++;
+				this.log.warn(`队列已满（${this.cfg.maxQueue}），丢弃切换前排队的消息 ${maskId(item.msgId)}`);
+				continue;
+			}
+			this.queue.push(item);
+			queued++;
 		}
+		if (queued > 0) this.log.info(`${label}，恢复 ${queued} 条消息`);
+		if (commands.length === 0) {
+			void this.pump();
+			return;
+		}
+		// 命令按顺序补跑完再泵消息：否则 /model、/compact 可能落到刚注入的提问之后
+		this.log.info(`${label}，补跑 ${commands.length} 条命令`);
+		void (async () => {
+			for (let i = 0; i < commands.length; i++) {
+				if (this.stopped) return;
+				if (this.stale) {
+					// 接棒还没完成：把剩下的命令原样放回队首，等下一次恢复，别静默丢掉
+					const rest = commands.slice(i).map((entry) => entry.item);
+					this.queue.unshift(...rest);
+					this.log.warn(`桥已暂停，${rest.length} 条命令留到接棒后再跑`);
+					return;
+				}
+				await this.#runCommand(commands[i].item, commands[i].command);
+			}
+			void this.pump();
+		})();
 	}
 
 	/** 直接回一条纯文本（命令的答复），不走模型、不占队列。 */
@@ -300,6 +376,11 @@ export class QqBridge {
 
 		// 正在切换会话：新消息留在暂存区，等 session_start 后放回队列，避免被 reset 清掉
 		if (this.switching) {
+			if (this.deferred.length >= this.cfg.maxQueue) {
+				this.stats.ignored++;
+				this.log.warn(`切换期间暂存已满（${this.cfg.maxQueue}），丢弃来自 ${logChat(item)} 的消息`);
+				return { accepted: false, reason: "暂存已满" };
+			}
 			this.deferred.push(item);
 			this.stats.received++;
 			this.log.info(`会话切换中，暂存消息 chat=${maskId(item.chatId)}（${this.deferred.length} 条）`);
@@ -418,7 +499,7 @@ export class QqBridge {
 	}
 
 	async pump() {
-		if (this.stopped || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
+		if (this.stopped || this.stale || this.switching || this.pumping || this.finishing || this.injecting || this.inflight || this.running || this.queue.length === 0) return;
 		this.pumping = true;
 		try {
 			await this.#pumpOnce();
@@ -453,15 +534,16 @@ export class QqBridge {
 		const downloaded = await Promise.all(
 			prompt.imageUrls.map(async (url) => {
 				const image = await downloadImage(url, this.cfg.images.maxBytes, mediaHeaders);
-				if (!image) this.log.warn(`图片下载失败：${url.slice(0, 80)}`);
+				if (!image) this.log.warn(`图片下载失败：${maskUrl(url)}`);
 				return image;
 			}),
 		);
 		const images = downloaded.filter(Boolean);
 
-		// 下载期间可能被 stop()、换会话或已经排了新消息
-		if (this.stopped || generation !== this.generation) {
-			if (generation === this.generation) this.queue.unshift(item);
+		// 下载期间可能被 stop()、换会话或已经排了新消息：放回队首，别把这条吞掉
+		if (this.stopped) return;
+		if (generation !== this.generation || this.switching || this.stale) {
+			this.queue.unshift(item);
 			return;
 		}
 
@@ -477,20 +559,21 @@ export class QqBridge {
 		};
 		this.inflight = inflight;
 
-		if (generation !== this.generation) return;
 		try {
 			const content = images.length > 0 ? [{ type: "text", text: prompt.text }, ...images] : prompt.text;
 			this.pi.sendUserMessage(content, item.expandTemplates ? { expandPromptTemplates: true } : undefined);
+			this.retryCount = 0;
 			this.log.info(`已注入 Pi（chat=${maskId(item.chatId)}，图片 ${images.length} 张）`);
 			// Pi 的 sendUserMessage 是 fire-and-forget，异步失败不会抛回来；靠看门狗兜底
 			this.#armInjectWatchdog(inflight);
 			this.#armAck(inflight);
 			this.#startTyping(inflight);
 		} catch (err) {
+			const inflight = this.inflight;
 			this.inflight = undefined;
 			if (isStaleContextError(err)) {
 				// 会话已被替换：旧 pi 句柄永久失效，重试多少次都不会成功
-				this.#failOnStale(item, err);
+				this.#failOnStale(item, err, inflight);
 				return;
 			}
 			// 可能刚好在流式输出中：放回队首，等 agent_settled 或定时器再试
@@ -502,42 +585,52 @@ export class QqBridge {
 	}
 
 	/**
-	 * 会话被替换后旧 pi 句柄永久失效：一次性告警、回执 QQ、停桥并交上层收尾。
-	 * 绝不能再走 #scheduleRetry：那条路径每 2 秒重试一次且没有上限。
+	 * 会话被替换：旧 pi 句柄永久失效。
+	 *
+	 * 不能每 2 秒重试（会无限刷），也不能把网关一起收掉——新会话实例很快就会通过
+	 * adopt() 接棒。所以这里只暂停：保留队列、网关和切换状态（switching/deferred 归
+	 * endSwitch/cancelSwitch 管），回一条提示，等新实例接手后自动继续。
 	 */
-	#failOnStale(item, err) {
-		if (this.staleReported) return;
-		this.staleReported = true;
+	#failOnStale(item, err, inflight) {
 		const reason = err?.message ?? String(err);
-		this.log.error(`会话已被替换，QQ 桥失效，停止桥接：${reason}`);
+		const first = !this.stale;
+		this.stale = true;
+		if (first) this.log.error(`会话已被替换，暂停注入直到新会话实例接棒：${reason}`);
+
+		// 丢掉在途轮次（回答属于旧会话，收不回来了），把消息还回去等接棒后重发
+		this.generation++;
+		this.#clearTimers();
+		this.#stopTyping(inflight ?? this.inflight);
+		this.inflight = undefined;
+		this.injecting = false;
+		if (item && !this.stopped) this.queue.unshift(item);
+
+		if (!first) return;
 		try {
 			const sending = this.api?.sendText?.(
 				replyTarget(item),
-				"⚠️ Pi 会话已切换，这个 QQ 桥已失效。请在终端执行 /qq stop 再 /qq start 恢复。",
+				"⚠️ Pi 会话已切换，QQ 桥正在等新会话接棒；刚才这条会在接棒后自动重试。",
 				{ msgId: item.msgId, msgSeq: this.#nextSeq({ seqs: new Set(), attemptsLeft: 1 }) },
 			);
 			if (sending && typeof sending.catch === "function") {
-				sending.catch((sendErr) => this.log.warn(`失效提示发送失败：${sendErr?.message ?? sendErr}`));
+				sending.catch((sendErr) => this.log.warn(`切换提示发送失败：${sendErr?.message ?? sendErr}`));
 			}
 		} catch {
-			// 网关可能已经不可用，回执失败不影响停桥
+			// 网关可能已经不可用，回执失败不影响接棒
 		}
-		this.notify("QQ 桥已随会话切换失效，已停止重试：请在终端 /qq stop 再 /qq start", "warning");
-		this.stop();
-		try {
-			this.onFatal?.(err);
-		} catch {
-			// 上层收尾失败不影响已经停掉的桥
-		}
+		this.notify("QQ 桥已暂停：Pi 会话被替换，等新会话接手后自动恢复", "warning");
 	}
 
 	#scheduleRetry() {
 		if (this.retryTimer || this.stopped) return;
+		// 退避：2s → 4s → 8s … 最多 30s。否则一条永久失败的消息会每 2 秒刷一次日志并堵住队列
+		this.retryCount = (this.retryCount ?? 0) + 1;
+		const delay = Math.min(2000 * 2 ** (this.retryCount - 1), 30_000);
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = undefined;
 			this.injecting = false;
 			void this.pump();
-		}, 2000);
+		}, delay);
 		this.retryTimer.unref?.();
 	}
 

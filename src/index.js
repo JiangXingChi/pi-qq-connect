@@ -36,6 +36,13 @@ function baseDir() {
 	return path.dirname(configPath());
 }
 
+/** AppID 是 9~10 位数字，maskId 对短 ID 不掩码，这里单独处理。 */
+function maskAppId(id) {
+	const text = String(id ?? "");
+	if (text.length <= 6) return "***";
+	return `${text.slice(0, 4)}***${text.slice(-3)}`;
+}
+
 function lockFilePath() {
 	return path.join(baseDir(), "pi-qq-connect.lock");
 }
@@ -65,7 +72,9 @@ function newRuntime() {
 		bridge: undefined,
 		error: null,
 		starting: false,
-		registered: false,
+		startPending: undefined,
+		owner: undefined,
+		sessionCtx: undefined,
 		lastInbound: undefined,
 		lockWatch: undefined,
 		runner: undefined,
@@ -79,20 +88,28 @@ const shared = root[RUNTIME_KEY] ?? (root[RUNTIME_KEY] = newRuntime());
 
 /** 测试用：彻底清掉进程内状态。 */
 export function resetRuntimeForTests() {
-	shared.bridge?.stop();
-	shared.gateway?.stop();
+	shared.bridge?.stop?.();
+	shared.gateway?.stop?.();
 	if (shared.lockWatch) clearInterval(shared.lockWatch);
 	Object.assign(shared, newRuntime());
+	delete shared.seenInstances;
 }
 
 export default function createExtension(pi) {
 	const state = shared;
+	// Pi 每换一次会话（/new、/resume、/fork、/reload）都会用新的 pi 句柄重跑扩展工厂，
+	// 旧句柄随即永久作废。状态仍用进程级单例，但事件与命令必须按实例注册：
+	// 否则新实例什么都不注册——/qq 等命令消失、session_start 收不到、
+	// 桥只能在 30 秒看门狗超时后误判「桥失效」。
 	state.extensionApi = pi;
 	if (state.bridge) state.bridge.pi = pi;
-	// 同一进程里被加载两次（例如自动发现 + 显式 --extension）时只注册一次，
-	// 否则命令与事件监听会重复，一条 QQ 消息会被回复两次。
-	if (state.registered) return state;
-	state.registered = true;
+	// 同一个对象被加载两次（自动发现 + 显式 --extension 命中同一路径）：别再注册一遍
+	const seen = (state.seenInstances ??= new WeakSet());
+	if (seen.has(pi)) return state;
+	seen.add(pi);
+
+	// 但同一个会话里被加载两次时，pi 也可能是两个不同的对象。同一个事件会带同一个 ctx，
+	// 所以再按 ctx 选举负责人，只让一个实例处理事件，避免一条 QQ 消息被回复两次。
 
 	function setStatus(label, detail) {
 		const text = detail ? `QQ: ${label} · ${detail}` : `QQ: ${label}`;
@@ -189,12 +206,16 @@ export default function createExtension(pi) {
 				settled = true;
 				clearTimeout(timer);
 				const owner = state.pendingExec?.done === done;
+				const pending = state.pendingExec;
 				if (owner) state.pendingExec = undefined;
-				// 失败/超时时不会有 session_start，得自己把暂存队列放出来（只由发起者解开）
-				if (!result?.ok && owner) state.bridge?.cancelSwitch();
+				// 失败/取消：如果这次确实已经开始换会话（见过 session_shutdown），就交给看门狗与接棒；
+				// 纯失败（被取消、报错、超时且根本没换）必须立刻把暂存队列放回去，别让整桥停 30 秒
+				if (!result?.ok && owner && !pending?.sawShutdown) state.bridge?.cancelSwitch();
 				resolve(result);
 			};
-			const timer = setTimeout(() => done({ ok: false, message: "Pi 20 秒内没有响应（可能正忙）" }), 20_000);
+			// 略长于 session.js 的 30 秒切换看门狗：看门狗先恢复队列，这里再清掉 pendingExec，
+			// 免得用户在 31~60 秒之间发 /new 还被「上一个还在进行中」挡住
+			const timer = setTimeout(() => done({ ok: false, message: "Pi 35 秒内没有完成会话切换（可能正忙）" }), 35_000);
 			timer.unref?.();
 			state.pendingExec = { done };
 			state.bridge?.beginSwitch();
@@ -245,7 +266,11 @@ export default function createExtension(pi) {
 	}
 
 	async function start(ctx, { keepLock = false } = {}) {
-		if (state.starting) return;
+		if (state.starting) {
+			// 正在起：记下这次的 ctx，等这一轮结束后再跑一次，别把新会话的 session_start 丢掉
+			state.startPending = ctx ?? state.startPending;
+			return;
+		}
 		state.starting = true;
 		state.ctx = ctx ?? state.ctx;
 		try {
@@ -331,18 +356,13 @@ export default function createExtension(pi) {
 				notify,
 			});
 			const bridge = new QqBridge({
-				pi,
+				pi: state.extensionApi ?? pi,
 				api,
 				config,
 				log: state.logger,
 				notify,
 				isOnline: () => state.gateway?.state === "connected",
 				onCommand: (command) => handleCommand(command),
-				onFatal: () => {
-					// 桥自己判定无法继续（通常是会话替换后句柄失效）：连网关一起收掉，避免静默吞消息
-					stop();
-					setStatus(STATE_LABEL.error, "会话切换后失效，需重启");
-				},
 			});
 			const gateway = new QqGateway({
 				auth,
@@ -365,7 +385,7 @@ export default function createExtension(pi) {
 			state.gateway = gateway;
 
 			setStatus(STATE_LABEL.connecting);
-			state.logger.info(`启动网关：${config.sandbox ? "沙箱" : "正式"}环境，AppID ${maskId(config.appId)}`);
+			state.logger.info(`启动网关：${config.sandbox ? "沙箱" : "正式"}环境，AppID ${maskAppId(config.appId)}`);
 			void gateway.start().catch((err) => {
 				state.error = err?.message ?? String(err);
 				state.logger.error(`网关启动失败：${state.error}`);
@@ -373,6 +393,18 @@ export default function createExtension(pi) {
 			});
 		} finally {
 			state.starting = false;
+			const pending = state.startPending;
+			state.startPending = undefined;
+			if (pending) {
+				if (state.bridge) {
+					// 桥已经建好：只需要把新会话的 ctx 接过来，重启一遍会白断网关、丢队列
+					state.ctx = pending;
+					state.bridge.adopt(state.extensionApi ?? pi);
+					void state.bridge.pump();
+				} else {
+					void start(pending);
+				}
+			}
 		}
 	}
 
@@ -383,7 +415,7 @@ export default function createExtension(pi) {
 		lines.push(`配置：${configPath()}${cfg ? "" : "（未加载）"}`);
 		if (state.error) lines.push(`错误：${state.error}`);
 		if (!cfg) return lines.join("\n");
-		lines.push(`环境：${cfg.sandbox ? "沙箱" : "正式"} · AppID ${maskId(cfg.appId)}`);
+		lines.push(`环境：${cfg.sandbox ? "沙箱" : "正式"} · AppID ${maskAppId(cfg.appId)}`);
 		lines.push(
 			`权限：allowAll=${cfg.allowAll} · 群 ${cfg.allowGroups.length} 个 · 用户 ${cfg.allowUsers.length} 个`,
 		);
@@ -402,7 +434,10 @@ export default function createExtension(pi) {
 		lines.push(`锁：${lock ? `pid ${lock.pid}（${lock.at}）` : "无"}`);
 		if (state.bridge) {
 			const s = state.bridge.status;
-			lines.push(`队列：${s.queue} 条${s.busy ? " · Pi 忙" : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`);
+			const flags = [s.busy ? "Pi 忙" : "", s.stale ? "已暂停，等新会话接棒" : ""].filter(Boolean).join(" · ");
+			lines.push(
+				`队列：${s.queue} 条${flags ? ` · ${flags}` : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`,
+			);
 		}
 		if (state.lastInbound) {
 			lines.push(`最近入站：${state.lastInbound.at} · ${state.lastInbound.kind} · 群/人 ${state.lastInbound.chat}`);
@@ -532,8 +567,13 @@ export default function createExtension(pi) {
 		setStatus(STATE_LABEL.stopped);
 	}
 
-	pi.registerCommand("qq", {
-		description: "QQ 机器人：status / start / stop / log / take（/new 请直接用 /new）",
+	// 命令不能在同会话的两个实例里各注册一次：pi 对同名命令的处理是「谁都别执行」。
+	let commandsRegistered = false;
+	function registerCommands() {
+		if (commandsRegistered) return;
+		commandsRegistered = true;
+		pi.registerCommand("qq", {
+			description: "QQ 机器人：status / start / stop / log / take（/new 请直接用 /new）",
 		handler: async (args, ctx) => {
 			state.ctx = ctx;
 			const [sub, ...rest] = String(args ?? "").trim().split(/\s+/);
@@ -598,51 +638,83 @@ export default function createExtension(pi) {
 					notify(HELP, "info");
 			}
 		},
-	});
+		});
+	}
 
 	pi.on("session_start", (event, ctx) => {
-		state.ctx = ctx;
-		state.extensionApi = pi;
-		if (state.bridge) state.bridge.pi = pi;
-
-		// /new /resume /fork 只是换了 Pi 会话：网关、锁保留
-		if (["new", "resume", "fork"].includes(event?.reason)) {
-			if (!state.bridge) {
-				// 没有活动桥（上一个实例的自己停了 / 被回收）：直接重建，别留一条没人管的网关
-				notify(`会话已切换（${event.reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
-				void start(ctx);
-				return;
-			}
-			if (event.reason === "new") {
-				state.bridge?.endSwitch();
-			} else {
-				// 手动 resume/fork：丢掉旧队列，重新开始
-				state.bridge?.reset();
-			}
+		// 新会话 → 新 ctx：重新选举负责人（同一会话的重复加载共用同一个 ctx）
+		if (state.sessionCtx !== ctx) {
+			state.sessionCtx = ctx;
+			state.owner = pi;
+		} else if (state.owner && state.owner !== pi) {
 			return;
 		}
-		void start(ctx);
+		state.owner = pi;
+		state.ctx = ctx;
+		state.extensionApi = pi;
+		const reason = event?.reason ?? "startup";
+		// 每个会话只由选中的实例注册一次命令（同名重复注册会让命令彻底失效）
+		registerCommands();
+
+		if (!state.bridge) {
+			// 没有活动桥（首次启动，或上一个实例的桥已经停了）：直接重建
+			if (reason !== "startup") {
+				notify(`会话已切换（${reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
+			}
+			void start(ctx);
+			return;
+		}
+
+		// 新会话实例接棒：换成新句柄，别再用旧实例那个已作废的 pi
+		state.bridge.adopt(pi);
+
+		// 换会话（含 reload、resume、fork）都保留网关、锁和排队消息，只把暂存条目放回来；
+		// 没经历 beginSwitch 的 session_start 不能调 endSwitch，否则会重置一个健康会话的在途轮次
+		if (state.bridge.switching) {
+			state.bridge.endSwitch();
+		} else {
+			void state.bridge.pump();
+		}
 	});
 
 	pi.on("session_shutdown", (event) => {
-		// 同一进程换会话时保留网关和锁；只有退出/重载才收摊
-		if (event?.reason === "new" || event?.reason === "resume" || event?.reason === "fork") return;
-		stop();
+		const reason = event?.reason ?? "unknown";
+		// owner 为 undefined（例如上一个实例刚退出、新的 session_start 还没来）时允许处理，
+		// 否则退出时没人收摊、换会话时也没人暂停注入
+		if (state.owner && state.owner !== pi) return;
+		state.logger?.info(`session_shutdown(${reason})`);
+		// 只有明确的退出类 reason 才收摊；其余（含 pi 以后新增的换会话 reason）一律按
+		// 「旧句柄即将作废」处理：暂停注入、暂存消息，等新实例的 session_start 接棒。
+		if (reason === "quit" || reason === "exit" || reason === "shutdown") {
+			state.owner = undefined;
+			stop();
+			return;
+		}
+		if (reason !== "new" && reason !== "resume" && reason !== "fork" && reason !== "reload") {
+			state.logger?.warn(`未知的 session_shutdown reason=${reason}，按换会话处理（保留网关）`);
+		}
+		// 这次是真换了会话：请求侧超时/取消时不要再 cancelSwitch（交给看门狗与接棒）
+		if (state.pendingExec) state.pendingExec.sawShutdown = true;
+		state.bridge?.beginSwitch();
 	});
 
 	pi.on("before_agent_start", (event) => {
+		if (state.owner !== pi) return;
 		state.bridge?.onBeforeAgentStart(event);
 	});
 
 	pi.on("agent_start", () => {
+		if (state.owner !== pi) return;
 		state.bridge?.onAgentStart();
 	});
 
 	pi.on("message_end", (event) => {
+		if (state.owner !== pi) return;
 		state.bridge?.onMessageEnd(event.message);
 	});
 
 	pi.on("agent_settled", (event) => {
+		if (state.owner !== pi) return;
 		state.bridge?.onAgentSettled(Boolean(event.aborted));
 	});
 

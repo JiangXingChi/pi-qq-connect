@@ -369,7 +369,7 @@ test("桥：/qq new 只回改名提示，不再切会话", async () => {
 	assert.equal(fake.sent.length, 0);
 });
 
-test("桥：换会话后旧队列作废", async () => {
+test("桥：reset() 清队列与在途（endSwitch 保留队列，见 session-adopt T9）", async () => {
 	const fake = createFakePi();
 	const api = stubApi();
 	const bridge = new QqBridge({ pi: fake.pi, api, config: normalizeConfig({ allowAll: true }), log: silentLog });

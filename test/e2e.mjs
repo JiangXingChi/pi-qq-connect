@@ -57,7 +57,7 @@ child.stdout.on("data", () => {
 
 function fail(message) {
 	console.error(`✖ ${message}`);
-	if (stderr.trim()) console.error("--- pi stderr ---\n" + stderr.trim().slice(-3000));
+	if (stderr.trim()) console.error("--- pi stderr ---\n" + stderr.trim());
 	console.error(`--- 扩展日志 ---\n${safeLog()}`);
 	child.kill("SIGTERM");
 	void mock.stop().then(() => process.exit(1));
@@ -65,7 +65,7 @@ function fail(message) {
 
 function safeLog() {
 	try {
-		return fs.readFileSync(logPath, "utf8").trim().slice(-3000) || "（空）";
+		return fs.readFileSync(logPath, "utf8").trim() || "（空）";
 	} catch {
 		return "（无日志）";
 	}
@@ -100,16 +100,33 @@ try {
 	if (!(sent.body.msg_seq >= 1 && sent.body.msg_seq < 65536)) throw new Error(`msg_seq 不在 0..65535：${sent.body.msg_seq}`);
 	if (sent.type !== "private") throw new Error(`目标类型不对：${sent.type}`);
 
-	// /qq new：QQ 里发命令，切到新 Pi 会话，网关不断，新会话还能继续聊
+	// /new：QQ 里发命令，切到新 Pi 会话，网关不断，命令保持可用，新会话还能继续聊
 	const identifiesBefore = mock.state.identifies.length;
-	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-new-1", userOpenId: "e2e-user", content: "/qq new" }), "e2e-new-1");
-	await until(() => mock.state.sends.some((s) => /已开新会话/.test(String(s.body.content ?? ""))), "新会话回执");
-	console.log("✔ QQ 收到「已开新会话」回执");
+	const sendsBefore = mock.state.sends.length;
+	const newStartedAt = Date.now();
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-new-1", userOpenId: "e2e-user", content: "/new" }), "e2e-new-1");
+	await until(
+		() => mock.state.sends.slice(sendsBefore).some((s) => /已开新会话/.test(String(s.body.content ?? ""))),
+		"新会话回执",
+	);
+	const switchMs = Date.now() - newStartedAt;
+	// 回执来自 ctx.newSession() 的 resolve，是性能冒烟值，不作为回归门槛；
+	// 真正的门槛是后面「新会话里继续对话」「/qq status 仍可用」「日志无 30 秒看门狗」
+	console.log(`✔ QQ 收到「已开新会话」回执（${switchMs}ms）`);
 
 	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-msg-2", userOpenId: "e2e-user", content: "请只回复：pong2" }), "e2e-msg-2");
 	await until(() => mock.state.sends.some((s) => /pong2/i.test(String(s.body.content ?? ""))), "新会话里继续对话");
 	console.log("✔ 新会话里继续对话成功");
-	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/qq new 期间网关被重连了");
+	if (mock.state.identifies.length !== identifiesBefore) throw new Error("/new 期间网关被重连了");
+
+	// 换会话后命令必须仍然可用（扩展实例被重新注册），且不能再报「桥已失效」
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "e2e-status-1", userOpenId: "e2e-user", content: "/qq status" }), "e2e-status-1");
+	await until(() => mock.state.sends.some((s) => /网关：/.test(String(s.body.content ?? ""))), "换会话后 /qq status 仍可用");
+	console.log("✔ 换会话后 /qq status 仍可用");
+	const logText = safeLog();
+	if (/stale after session replacement/i.test(logText)) throw new Error("换会话后出现 stale 报错");
+	if (/换会话 30 秒内没有完成/.test(logText)) throw new Error("换会话没收到 session_start，走了 30 秒看门狗");
+	if (/QQ 桥已暂停/.test(logText)) throw new Error("换会话后桥被误判失效");
 
 	const sessionFiles = fs.readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
 	if (sessionFiles.length < 2) throw new Error(`新会话没有落盘，只有 ${sessionFiles.length} 个 session 文件`);

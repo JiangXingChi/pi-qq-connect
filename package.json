@@ -1,60 +1,60 @@
 {
-  "name": "pi-qq-connect",
-  "version": "0.4.0",
-  "description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
-  "type": "module",
-  "license": "MIT",
-  "author": "JiangXingChi",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
-  },
-  "homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
-  "bugs": {
-    "url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
-  },
-  "engines": {
-    "node": ">=22.19.0"
-  },
-  "keywords": [
-    "pi-package",
-    "pi",
-    "pi-extension",
-    "qq",
-    "qqbot",
-    "chatbot",
-    "bridge"
-  ],
-  "bin": "bin/pi-qq-connect.mjs",
-  "pi": {
-    "extensions": [
-      "./index.js"
-    ]
-  },
-  "files": [
-    "index.js",
-    "src",
-    "bin",
-    "examples",
-    "packaging",
-    "scripts/install.sh",
-    "scripts/uninstall.sh",
-    "docs/ARCHITECTURE.md",
-    "docs/DEVELOPMENT.md",
-    "docs/PLAN.md",
-    "README.md",
-    "README.en.md",
-    "LICENSE",
-    "CHANGELOG.md"
-  ],
-  "scripts": {
-    "test": "node --test test/",
-    "e2e": "node test/e2e.mjs",
-    "e2e:service": "node test/e2e-service.mjs",
-    "e2e:service-cmd": "node test/e2e-service-cmd.mjs",
-    "prepublishOnly": "npm test"
-  },
-  "publishConfig": {
-    "access": "public"
-  }
+	"name": "pi-qq-connect",
+	"version": "0.4.1",
+	"description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
+	"type": "module",
+	"license": "MIT",
+	"author": "JiangXingChi",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/JiangXingChi/pi-qq-connect.git"
+	},
+	"homepage": "https://github.com/JiangXingChi/pi-qq-connect#readme",
+	"bugs": {
+		"url": "https://github.com/JiangXingChi/pi-qq-connect/issues"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-extension",
+		"qq",
+		"qqbot",
+		"chatbot",
+		"bridge"
+	],
+	"bin": "bin/pi-qq-connect.mjs",
+	"pi": {
+		"extensions": [
+			"./index.js"
+		]
+	},
+	"files": [
+		"index.js",
+		"src",
+		"bin",
+		"examples",
+		"packaging",
+		"scripts/install.sh",
+		"scripts/uninstall.sh",
+		"docs/ARCHITECTURE.md",
+		"docs/DEVELOPMENT.md",
+		"docs/PLAN.md",
+		"README.md",
+		"README.en.md",
+		"LICENSE",
+		"CHANGELOG.md"
+	],
+	"scripts": {
+		"test": "node --test test/",
+		"e2e": "node test/e2e.mjs",
+		"e2e:service": "node test/e2e-service.mjs",
+		"e2e:service-cmd": "node test/e2e-service-cmd.mjs",
+		"prepublishOnly": "npm test"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
 }

@@ -36,7 +36,9 @@ export class QqAuth {
 
 	/** 供日志使用的脱敏版本 */
 	describe() {
-		return `appId=${this.appId} token=${this.token ? "cached" : "none"}`;
+		const id = String(this.appId ?? "");
+		const masked = id.length <= 6 ? "***" : `${id.slice(0, 4)}***${id.slice(-3)}`;
+		return `appId=${masked} token=${this.token ? "cached" : "none"}`;
 	}
 
 	async #fetchToken() {

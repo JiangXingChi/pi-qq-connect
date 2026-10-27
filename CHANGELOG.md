@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.1 — 2026-10-27
+
+修「发一次 `/new`，QQ 桥就废掉」。
+
+pi 1.4 换会话的时序（实测）：旧实例先收到 `session_shutdown` 且 `pi` 句柄**立即永久作废**，
+新实例的扩展工厂随后重跑、收到 `session_start`，旧实例的 `withSession` 才执行。
+0.4.0 用 `state.registered` 让新实例直接 return，于是新实例什么都没注册：
+
+- `session_start` 没人接 → `endSwitch()` 不执行 → 30 秒看门狗超时，暂存消息延后才放回；
+- `/qq`、`/new` 等命令在新会话里全部消失；
+- 随后拿旧句柄注入，报 `stale after session replacement`，桥自我判死，只能重启示服务。
+
+改动：
+
+- 事件与命令改成**按 pi 实例注册**（`WeakSet` 去重），同一实例重复加载仍只注册一次；
+  换会话后新实例照常注册命令与事件。
+- 新增 `bridge.adopt(pi)`：新实例接棒时换掉死句柄。
+- `session_shutdown` 的 `new`/`resume`/`fork`/`reload` 改为 `beginSwitch()`：暂停注入、
+  暂存消息，网关与锁保留；`session_start` 接棒后 `endSwitch()` 收尾。
+- stale 不再自毁：只标记暂停、把消息留在队列、每个切换周期最多提示一次，等新实例接棒后自动恢复。
+- 修审阅发现：`beginSwitch` 重复调用不再清空暂存；`endSwitch` 保住排队消息并重新解析暂存命令
+  （斜杠命令不会被当提问喂模型）；`pump` 在切换中不注入；stale 时保留切换状态；
+  注入失败重试改为 2s→30s 退避；`/qq status` 显示暂停状态；AppID 打码；`start()` 重入不再丢 `session_start`。
+- 测试：新增 `test/session-adopt.test.mjs`（实例接棒、reload/fork、重复 beginSwitch、队列保留、暂存命令）；
+  e2e 改用真实的 `/new`，并断言换会话后 `/qq status` 仍可用、日志里没有 stale。
+
 ## 0.4.0 — 2026-10-27
 
 目标从「QQ 里能用」提到「QQ 里和终端一样」。

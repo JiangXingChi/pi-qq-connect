@@ -2,7 +2,7 @@
  * 会话切换回归测试（不连 QQ 网关、不碰真实会话）。
  *
  *   P0 isStaleContextError 只认 pi 的 stale 文案
- *   P1 stale 注入 → 停桥 + 一次性告警 + onFatal，不再每 2 秒无限重试
+ *   P1 stale 注入 → 暂停注入（不停桥、不无限重试），新实例接手后自动恢复
  *   P2 session_start(new|resume|fork) 且没有活动桥 → 重建（自愈）
  *   P3 switchSession 按 pi 文档传 withSession
  */
@@ -56,49 +56,68 @@ test("P0 isStaleContextError 识别", async (t) => {
 	});
 });
 
-test("P1 stale 注入不再无限重试", async (t) => {
+test("P1 stale 注入只暂停，接棒后恢复", async (t) => {
 	const logs = [];
 	const notes = [];
-	let fatal = 0;
+	const sends = [];
+	let attempts = 0;
+	const stalePi = {
+		sendUserMessage() {
+			attempts++;
+			throw new Error(STALE);
+		},
+	};
 	const bridge = new QqBridge({
-		pi: {
-			sendUserMessage() {
-				throw new Error(STALE);
+		pi: stalePi,
+		api: {
+			sendText: async (target, content) => {
+				sends.push({ target, content });
 			},
 		},
-		api: { sendText: () => ({}) },
 		config: makeCfg(),
 		log: makeLog(logs),
 		notify: (message) => notes.push(message),
 		isOnline: () => true,
 		onNewSession: () => {},
-		onFatal: (err) => {
-			fatal++;
-			assert.equal(isStaleContextError(err), true);
-		},
 		injectTimeoutMs: 0,
 	});
 	bridge.enqueue(makeItem());
-	await sleep(300);
+	await waitFor(() => bridge.stale === true, { label: "进入 stale 状态" });
 
-	await t.test("桥已停止", () => assert.equal(bridge.stopped, true));
-	await t.test("没有残留重试定时器", () => {
+	await t.test("桥没有自毁（网关仍在）", () => assert.equal(bridge.stopped, false));
+	await t.test("标记 stale 并停止重试", () => {
+		assert.equal(bridge.stale, true);
 		assert.equal(bridge.retryTimer, undefined);
 		assert.equal(bridge.injectTimer, undefined);
+		assert.equal(attempts, 1, "stale 后不应再重试注入");
 	});
-	await t.test("队列清空、无 inflight", () => {
-		assert.equal(bridge.queue.length, 0);
+	await t.test("没处理的消息留在队列里等接棒", () => {
 		assert.equal(bridge.inflight, undefined);
+		assert.equal(bridge.queue.length, 1);
 	});
-	await t.test("onFatal 只调用一次", () => assert.equal(fatal, 1));
 	await t.test("stale 只记一次 error，不再打「等空闲后重试」", () => {
 		const staleLines = logs.filter((l) => /stale after session replacement/i.test(l.message));
 		assert.equal(staleLines.length, 1, `stale 记录 ${staleLines.length} 条`);
 		assert.equal(logs.filter((l) => l.message.includes("等空闲后重试")).length, 0);
 	});
-	await t.test("给 QQ 的提示带 /qq stop", () => {
-		assert.ok(notes.some((n) => n.includes("/qq stop")), "缺少 /qq stop 提示");
+	await t.test("提示不再要求用户手动 /qq stop", () => {
+		assert.ok(notes.some((n) => n.includes("自动恢复")), "缺少自动恢复提示");
+		assert.ok(sends.some((s) => String(s.content).includes("接棒")), "缺少给 QQ 的提示");
 	});
+
+	await t.test("新实例接手后自动恢复（走生产路径 adopt + endSwitch）", async () => {
+		const injected = [];
+		bridge.adopt({
+			sendUserMessage(content) {
+				injected.push(content);
+			},
+		});
+		assert.equal(bridge.stale, false);
+		bridge.endSwitch();
+		await waitFor(() => injected.length >= 1, { label: "接棒后重新注入积压消息" });
+		assert.equal(bridge.queue.length, 0, "积压消息应被处理完");
+	});
+	bridge.stop();
 });
 
 test("P1 非 stale 错误仍保留原有重试行为（防回归）", async (t) => {
@@ -180,18 +199,29 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
 	await t.test("state.ctx 指向新会话上下文", () => assert.equal(state.ctx, firstCtx));
 
 	let ended = 0;
-	let reset = 0;
+	let adopted = 0;
 	state.bridge = {
 		pi: null,
-		endSwitch: () => {
+		switching: false,
+		adopt(pi) {
+			adopted++;
+			this.pi = pi;
+		},
+		endSwitch() {
 			ended++;
+			this.switching = false;
 		},
-		reset: () => {
-			reset++;
+		beginSwitch() {
+			this.switching = true;
 		},
+		pump() {},
+		reset() {},
 	};
 	const secondCtx = makeCtx();
 	const before = notifications.length;
+	// 真实时序：先 session_shutdown（暂停注入），再 session_start（接棒收尾）
+	await fake.emit("session_shutdown", { reason: "new" });
+	await t.test("shutdown 时进入切换态", () => assert.equal(state.bridge.switching, true));
 	await fake.emit("session_start", { reason: "new" }, secondCtx);
 	await sleep(120);
 
@@ -201,11 +231,18 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
 	});
 	await t.test("有桥时刷新 bridge.pi", () => assert.equal(state.bridge.pi, fake.pi));
 
+	await fake.emit("session_shutdown", { reason: "resume" });
 	await fake.emit("session_start", { reason: "resume" }, makeCtx());
-	await t.test("resume 时重置队列", () => {
-		assert.equal(reset, 1);
+	await t.test("resume 同样接棒并结束切换", () => {
+		assert.equal(adopted, 2);
+		assert.equal(ended, 2);
 		assert.equal(state.ctx, nextCtx);
 	});
+
+	// 没有经历 beginSwitch 的 session_start（例如 reload 后重放）不能重置健康会话
+	const endedBefore = ended;
+	await fake.emit("session_start", { reason: "startup" }, makeCtx());
+	await t.test("无切换态时不调 endSwitch", () => assert.equal(ended, endedBefore));
 	state.bridge = undefined;
 });
 

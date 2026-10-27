@@ -16,6 +16,8 @@ import { startMockQq } from "./mock-qq.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-svc-"));
+// 隔离的 Pi 配置目录：否则会加载用户已 `pi install` 的同一插件，第二条网关连线把用例搅黄
+const agentDir = path.join(dir, "agent");
 const configPath = path.join(dir, "config.json");
 const sessionDir = path.join(dir, "sessions");
 fs.mkdirSync(sessionDir, { recursive: true });
@@ -39,7 +41,7 @@ fs.writeFileSync(
 
 const child = spawn(process.execPath, [path.join(root, "bin", "pi-qq-connect.mjs"), "--cwd", dir, "--session-id", "pi-qq-e2e-service"], {
 	cwd: dir,
-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
+	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
 	stdio: ["ignore", "pipe", "pipe"],
 });
 let output = "";
@@ -79,7 +81,7 @@ if (state.pid !== child.pid) {
 // 第二个服务实例应被拒绝
 const second = spawn(process.execPath, [path.join(root, "bin", "pi-qq-connect.mjs"), "--cwd", dir, "--session-id", "dup"], {
 	cwd: dir,
-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
+	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
 	stdio: ["ignore", "pipe", "pipe"],
 });
 const secondExit = await new Promise((resolve) => {

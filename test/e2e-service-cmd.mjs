@@ -14,6 +14,8 @@ import { startMockQq } from "./mock-qq.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-qq-connect-svccmd-"));
+// 隔离的 Pi 配置目录，避免加载用户已安装的同名插件
+const agentDir = path.join(dir, "agent");
 const configPath = path.join(dir, "config.json");
 const sessionDir = path.join(dir, "sessions");
 fs.mkdirSync(sessionDir, { recursive: true });
@@ -37,7 +39,7 @@ fs.writeFileSync(
 
 const child = spawn("pi", ["--mode", "rpc", "--session-dir", sessionDir, "--no-extensions", "--extension", root], {
 	cwd: dir,
-	env: { ...process.env, PIQQCONNECT_CONFIG: configPath },
+	env: { ...process.env, PIQQCONNECT_CONFIG: configPath, PI_CODING_AGENT_DIR: agentDir },
 	stdio: ["pipe", "pipe", "pipe"],
 });
 let output = "";

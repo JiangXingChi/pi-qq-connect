@@ -63,9 +63,12 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
 执行完 `ctx.newSession()` 直接把真实结果 resolve 回去（0.3.0 及以前是轮询 15 秒，常报假失败）。
 `/qq new` 保留为别名，行为相同；`/qq new` 在 QQ 里只会回一条「已并入 `/new`」。
 
-换会话期间（`bridge.beginSwitch()`）到达的消息进 `deferred` 暂存；`session_start(reason="new")`
-触发 `endSwitch()` 放回队列。若 30 秒内没等到 `session_start`（被拒绝、报错、超时），定时器或
-`requestNewSession()` 的失败分支会 `cancelSwitch()`，绝不让消息卡在暂存区。
+换会话期间（`bridge.beginSwitch()`，可重复调用，只续看门狗、不清暂存）到达的消息进 `deferred`；
+新会话实例的 `session_start` 触发 `endSwitch()`：保住原来排队的消息、丢掉旧会话的在途回答、
+把暂存的条目**重新解析**（斜杠命令重新走命令通道，绝不喂模型）后放回队列。
+若 30 秒内没等到 `session_start`（被拒绝、报错、超时），定时器或 `requestNewSession()` 的失败分支
+会 `cancelSwitch()`，绝不让消息卡在暂存区；`requestNewSession()` 的超时（60 秒）比看门狗长，
+且切换仍在进行时不会擅自 `cancelSwitch()`。
 
 ## 资源加载（0.4.0）
 
@@ -74,16 +77,23 @@ src/api.js ──► https://api.bot.qq.com（生产）/ sandbox.api.sgroup.qq.c
 技能、模板、主题、`AGENTS.md`）。QQ 会话因此与终端会话加载同一套资源。
 
 `extensions: "none"` 退回隔离模式（`--no-extensions` + 只挂自身）；数组是白名单，
-`builtin:tool-search` 这类条目原样透传。自动发现与显式 `--extension` 同时命中时，
-入口的 `Symbol.for` 幂等守卫保证只注册一次。
+`builtin:tool-search` 这类条目原样透传。自动发现与显式 `--extension` 同时命中时：
+同一个 `pi` 对象只注册一次（`WeakSet`）；若 pi 给的是两个不同对象（实测会这样），
+再按 `session_start` 的同一个 `ctx` 选举负责人，只让一个实例处理事件与接棒。
 
 Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再用会抛
-`This extension ctx is stale after session replacement or reload...`。插件对这个错误的处理是：
+`This extension ctx is stale after session replacement or reload...`。实测时序：
+旧实例先收到 `session_shutdown`（句柄当场作废）→ 扩展工厂重跑出新实例 → 新实例收到 `session_start`
+→ 旧实例的 `withSession` 才执行。插件的处理是：
 
+- 事件与命令**按 pi 实例注册**（不再用「只注册一次」的布尔量）；状态走 `globalThis` 单例；
 - `switchSession()` 传 `withSession`，在回调里刷新 `state.ctx`；
-- 桥注入时命中 stale → 记一条 error、给 QQ 回一次「`/qq stop` 再 `/qq start`」、停桥并交上层收尾，
-  **不**再走「每 2 秒无限重试」那条路（0.2.9 之前会无限重试，日志能刷到几百 KB 且消息全丢）；
-- `session_start(new|resume|fork)` 时若已没有活动桥 → 直接 `start(ctx)` 重建，网关和锁保持。
+- `session_shutdown` 的换会话/重载类 reason → `bridge.beginSwitch()`（暂停注入、暂存消息，网关和锁保留）；
+  只有 `quit`/`exit`/`shutdown` 才收摊，未知 reason 按换会话处理并记一条 warn；
+- 新实例的 `session_start` → `bridge.adopt(pi)` 换掉死句柄 + `endSwitch()` 收尾；
+- 万一仍命中 stale（例如新实例没加载出来）→ 记一条 error、给 QQ 回一次提示、**暂停但不自毁**：
+  队列与网关保留，等下一次 `adopt()` 自动恢复；每个切换周期只提示一次；
+- `session_start` 时若已没有活动桥 → 直接 `start(ctx)` 重建，网关和锁保持。
 
 后台服务的启动参数必须是**稳定路径**（例如 `pi install` 后的包目录）。若 `--extension` 指向的目录
 已经不存在，Pi 会静默跳过该扩展，新会话里根本没有插件实例——这种情况只能靠别用临时目录来避免。
@@ -128,6 +138,6 @@ Pi 1.4 起，换会话/重载后旧 `pi` 和旧 `ctx` 句柄立即作废，再�
 
 ## 测试
 
-- `npm test`：64 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话切换回归。
-- `npm run e2e`：真 `pi --mode rpc` + mock QQ，调一次模型。
+- `npm test`：131 项，mock QQ（HTTP + 最小 WebSocket）覆盖网关、桥、配置、媒体上传、会话接棒/切换回归。
+- `npm run e2e`：真 `pi --mode rpc` + mock QQ，调两次模型；断言 `/new` 后 10 秒内回执、命令仍可用、日志无 stale。
 - `npm run e2e:service` / `e2e:service-cmd`：后台服务生命周期与 `/qq start|stop`。

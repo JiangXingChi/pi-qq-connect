@@ -10,6 +10,7 @@ export function createFakePi() {
 	const handlers = new Map();
 	const sent = [];
 	const commands = new Map();
+	const commandRegistrations = [];
 	const pi = {
 		streaming: false,
 		on(name, fn) {
@@ -22,6 +23,7 @@ export function createFakePi() {
 			};
 		},
 		registerCommand(name, options) {
+			commandRegistrations.push(name);
 			commands.set(name, options);
 		},
 		sendUserMessage(content, options) {
@@ -43,6 +45,7 @@ export function createFakePi() {
 		pi,
 		sent,
 		commands,
+		commandRegistrations,
 		async emit(name, payload, ctx) {
 			for (const fn of handlers.get(name) ?? []) await fn(payload, ctx);
 		},
