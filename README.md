@@ -2,269 +2,90 @@
 
 [![npm](https://img.shields.io/npm/v/pi-qq-connect)](https://www.npmjs.com/package/pi-qq-connect)
 [![license](https://img.shields.io/npm/l/pi-qq-connect)](LICENSE)
-[English](README.en.md)
 
-> **平台要求：Linux**。后台服务通过 systemd 用户单元（`systemctl --user`）管理，
-> 仅在 Linux 上验证；macOS / Windows 未支持。
+> **Platform: Linux only.** The background service is a systemd *user* unit
+> (`systemctl --user`). macOS and Windows are neither tested nor supported.
 
-把 **QQ 官方机器人**接到**当前 Pi 会话**的插件。零运行时依赖，只用 Node ≥22.19 自带的
-`fetch` / `WebSocket` / `node:crypto` / `node:http`，安装后即可用。
+Bridge the **official QQ bot platform** to the **current Pi session**. Messages sent in QQ
+reach your Pi session; the final answer is sent back as a passive reply. Zero runtime
+dependencies (Node built-ins only).
 
-- QQ 里发的文字 → `pi.sendUserMessage()` → Pi 干活 → 回答被动回复到 QQ
-- 所有 QQ 消息进同一个 Pi 会话，上下文连续；终端里也能看到这些对话
-- 私聊 + 群聊（群里必须 @机器人，平台只推这种事件）
-- 入站图片下载后作为 Pi 图片输入；语音用 QQ 自带转写；引用消息带上下文
-- 单聊「正在输入」；长回复按代码围栏切块；失败换新 `msg_seq` 重试
-- 出站图片/文件：回复末尾 `[[file:/绝对路径]]`，分片上传后以图片/文件卡片发出
-- 入站去重、串行队列、被动回复预算、窗口兜底、单实例锁、后台常驻服务
-- 会话切换后旧 pi 句柄作废：新会话实例自动接棒，命令与队列都保留（不再停桥、不再 30 秒超时）
-- `/new`、`/resume` 都不会把网关断掉重连
-- QQ 里可用：`/new`（开新会话），以及技能 / 提示模板 / 其它插件命令
+## Features
 
-## 前置：注册 QQ 机器人
+- Private chats and group @-mentions; images, voice transcripts, quoted messages, typing
+- Serial queue, deduplication, passive-reply budget, single-instance lock
+- Long replies split on code fences; failures retry with a fresh `msg_seq`
+- Outbound images/files via `[[file:/absolute/path]]` in a reply (max 3)
+- Session switches keep the gateway up; the next session instance adopts the bridge
+- Background service under systemd; startup is silent, errors carry a stable `[QQ_E_*]` code
+- In chat only `/new` is mapped; skills, prompt templates and other extensions still work
 
-1. 打开 <https://q.qq.com> → 用 QQ 扫码注册开发者（个人可注册）→ 创建机器人应用
-2. 在「开发设置」里拿 **AppID**（纯数字）和 **AppSecret**
-3. 开发期先用**沙箱**：在「沙箱配置」把自己测试用的 QQ 加进白名单；群聊需要把机器人拉进群，并把群加进沙箱
-4. 正式环境需要在管理端提交上线/审核，通过后 `sandbox` 改 `false`
+## Requirements
 
-不需要公网 IP、不需要回调地址：插件主动连 QQ 的 WebSocket 网关（官方支持的正向接入）。
+- A QQ bot on the [official platform](https://q.qq.com/) (appId + clientSecret)
+- Node.js >= 22.19
+- Pi >= 1.4
+- Linux with systemd (user units)
 
-## 安装
-
-三种方式**选一种**，不要叠加（同一扩展会被加载两次，两个网关会抢锁）。
-
-从 npm（推荐）：
+## Install
 
 ```bash
 pi install npm:pi-qq-connect
-```
-
-从源码作为包安装：
-
-```bash
-git clone https://github.com/JiangXingChi/pi-qq-connect.git
-cd pi-qq-connect
+# or from a checkout
 pi install .
 ```
 
-开发时只软链（不写 settings）：
+Restart Pi after installing.
 
-```bash
-./scripts/install.sh
-```
+## Configure
 
-已用 `pi install` 装过时，`install.sh` 会检测到并拒绝执行。
-
-它会软链到 `~/.pi/agent/extensions/pi-qq-connect`，并在不存在时生成一份
-`~/.pi/agent/pi-qq-connect.json`（权限 600）。填配置：
+Create `~/.pi/agent/pi-qq-connect.json` (mode `0600`):
 
 ```json
 {
-  "appId": "1234567890",
-  "clientSecret": "你的 AppSecret",
-  "sandbox": true,
-  "allowAll": false,
-  "allowUsers": [],
-  "allowGroups": []
+  "appId": "your-app-id",
+  "clientSecret": "your-app-secret",
+  "sandbox": false,
+  "allowAll": true
 }
 ```
 
-完整字段见 [`examples/config.json`](examples/config.json) 和下面的配置表。重启 `pi`，
-终端输入 `/qq status` 应显示网关在线。
+See `examples/config.json` for every option. `allowAll: true` is fine for a personal bot;
+otherwise list `allowUsers` / `allowGroups`.
 
-## 使用
+## Commands
 
-| 场景 | 操作 |
+Terminal:
+
+| Command | Purpose |
 |---|---|
-| 私聊 | 直接发消息 |
-| 群聊 | @机器人 再说话（平台只推 @ 事件） |
-| 看状态 | `/qq status`（网关、队列、最近入站、后台服务） |
-| 启动后台 | `/qq start`：拉起常驻 pi，QQ 会话交给它 |
-| 停止 | `/qq stop`：停后台服务；没有服务时断开本进程网关 |
-| 看日志 | `/qq log 50` |
-| 开新会话 | QQ 里发 `/new`（或 `/new 名字`） |
-| 登录 / 登出 | `/qq login` 校验凭据并重启服务；`/qq logout` 停服务并移除 clientSecret |
-| 发文件 | 让 Pi 在回复末尾写 `[[file:/绝对路径]]`，最多 3 个 |
+| `/qq status` | gateway, queue, last inbound, service |
+| `/qq start` / `/qq stop [--force]` | manage the background service |
+| `/qq log [n]` | last n log lines (default 20) |
+| `/qq help` | this list |
+| `/qq login` | validate appId/clientSecret, restart the service |
+| `/qq logout` | stop the service, back up the config and remove clientSecret |
 
-QQ 里的 `/qq` 命令共 7 条：`status` / `start` / `stop` / `log` / `help` / `login` / `logout`。
-聊天窗口只映射 `/new`；`/model` 等控制命令请在终端执行。
+In the QQ chat window only `/new` is mapped: send `/new` or `/new name` to start a new
+session. Control commands answer with a terminal hint. Skills, prompt templates and other
+extension commands are forwarded to Pi unchanged.
 
-后台服务在线时，终端里的 `/qq start`、`/qq stop` 才起作用；QQ 会话由服务进程管理，
-终端 `/new` 只切本地 TUI。
-
-### QQ 里的命令
-
-以 `/` 开头的消息不会喂给模型，而是当命令执行，和终端里敲命令一样：
-
-| 命令 | 作用 |
-|---|---|
-| `/new [名称]` | 开新会话 |
-| `/skill:xxx`、提示模板、其它插件命令 | 原样交给 Pi 执行 |
-| 控制命令（`/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help`） | 回「只能在终端用」，不会当提问 |
-| TUI 专用命令（`/resume` `/tree` `/export` 等） | 回「只能在终端用」 |
-
-### 发文件
-
-在 QQ 里让 Pi 处理完文件后，Pi 会在回复末尾写 `[[file:/绝对路径]]`（插件已在每条 QQ 消息的
-提示里告诉它）。插件会：
-
-1. 摘掉标记，正常发文字；
-2. 校验文件（存在、普通文件、非敏感路径、≤200MB）；
-3. 分片上传 → `msg_type=7` 发出，QQ 里显示图片或文件卡片；
-4. 每次最多 3 个，每个占一次被动回复额度。
-
-敏感路径（`~/.ssh`、`~/.config`、`~/.pi/agent` 等）一律拒绝；可用 `files.allowDirs`
-限定只允许某些目录。
-
-### 后台常驻服务（推荐）
-
-插件自己管一个后台 pi，QQ 会话固定落在 `pi-qq-connect-service` 这条会话上，不用一直开着 TUI：
-
-```bash
-/qq start     # 拉起后台 pi（detached，父进程退出也不停）
-/qq status    # 看 pid、心跳、会话、日志路径
-/qq stop      # SIGTERM 并等它退出
-```
-
-- 后台服务在线时，TUI 里的插件只当控制面：不连网关、不抢锁，状态栏显示「QQ: 服务在线」。
-- 状态文件 `~/.pi/agent/pi-qq-connect.service.json`（15 秒一次心跳），日志
-  `~/.pi/agent/pi-qq-connect.service.log`。
-- 心跳超过 45 秒没更新就判定掉线，可 `/qq start` 重拉。
-- 已有健康服务时，第二个实例会自己退出，不会出现两个 pi 抢网关。
-- 状态文件里的 pid 还活着但心跳已停（可能是 pid 被复用），`/qq stop` 会拒绝发信号；
-  确认后加 `--force`。
-- 想开机自启可以用 systemd（见下），两者选一个即可，不要同时开。
-
-### 前台常驻 / systemd
-
-```bash
-./bin/pi-qq-connect.mjs --cwd ~            # 前台跑
-```
-
-它拉起 `pi --mode rpc --session-id pi-qq-connect-service --extension 本项目`，只要 stdin 不关 pi 就不退出。
-需要开机自启（用户级服务 + linger，不用 sudo 装系统服务）：
+## Background service
 
 ```bash
 cp packaging/pi-qq-connect.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now pi-qq-connect
-loginctl enable-linger $USER   # 已开启可跳过；不登录也会在开机时启动
 ```
 
-- 单元里已把 `~/.local/bin` 和 `/usr/sbin` 加进 PATH，并固定 `--session-id pi-qq-connect-service`。
-- 单元默认指向本机源码路径；npm 全局安装的用户把 `ExecStart` 改成
-  `%h/.npm-global/bin/pi-qq-connect --cwd %h --session-id pi-qq-connect-service`（路径以 `npm bin -g` 为准）。
-- 网络没就绪也无需处理：网关会按 1s→60s 退避重连，联网后自动上线。
-- 启用 systemd 后日常用 `systemctl --user start|stop|restart pi-qq-connect`；
-  `/qq stop` 也会停掉它（干净退出，`Restart=on-failure` 不会自动拉回），下次开机再启动。
-- 开机自启与插件自己的 `/qq start` 不要同时管理：unit 在跑时 `/qq start` 只会提示已在运行。
+The plugin starts the service with `systemctl --user start` when a unit exists, and falls
+back to a detached process otherwise. Logs: `journalctl --user -u pi-qq-connect -n 50`.
 
-## 配置项
+## Limits
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `enabled` | true | 总开关 |
-| `appId` / `clientSecret` | — | 开放平台凭据（也可用 `PIQQCONNECT_APP_ID` / `PIQQCONNECT_CLIENT_SECRET`） |
-| `sandbox` | false | 沙箱环境 |
-| `allowAll` | false | 放开所有人（自用临时调试用） |
-| `allowUsers` / `allowGroups` | [] | openid 白名单，支持 `*` 结尾前缀匹配 |
-| `envelope` | true | 给消息加 `[QQ群聊 · 群 xxx · 成员 xxx]` 头 |
-| `replyFormat` | plain | `plain` 清掉 Markdown；`markdown` 走 msg_type=2，被拒自动退回纯文本 |
-| `maxChunks` | 4 | 一条回复最多分几段（平台上限 5，留 1 条余量） |
-| `replyQuota` | 5 | 发送总次数上限（含回执；重试复用 seq）；实际按场景取小：单聊 4、群 5 |
-| `files` | 开启 | `enabled` / `maxCount`（最多 3）/ `maxBytes`（200MB）/ `allowDirs` |
-| `chunkChars` | 4000 | 每段字数 |
-| `typing` | true | 单聊发「正在输入」（群聊 QQ 不支持） |
-| `ackAfterMs` | 0 | >0 时长任务先回「收到，正在处理…」（占一次额度） |
-| `passiveWindowSec` | 群 300 / 单聊 3600 | 被动回复窗口 |
-| `images.maxCount/maxBytes` | 2 / 8MB | 入站图片限制 |
-| `lock` | true | 单实例锁（`~/.pi/agent/pi-qq-connect.lock`） |
-| `extensions` | auto | 后台服务加载哪些 Pi 插件：`auto` 交给 Pi 自己发现（与终端一致）/ `none` 只加载自身 / `["npm:包名", "/绝对/路径", "builtin:tool-search"]` 白名单 |
-| `overflow` | file | 回答超过分片上限时：`file` 全文存附件发出去 / `truncate` 只发前几段 |
-| `replyDir` | `~/.pi/agent/qq-replies` | `overflow=file` 时全文的落盘目录 |
-| `log.file/level` | `~/.pi/agent/pi-qq-connect.log` / info | 日志 |
-| `endpoints` | 空 | 测试用：覆盖 token / api / 网关地址 |
-
-环境变量：`PIQQCONNECT_CONFIG`、`PIQQCONNECT_APP_ID`、`PIQQCONNECT_CLIENT_SECRET`、`PIQQCONNECT_SANDBOX=1`、
-`PIQQCONNECT_DISABLED=1`。
-
-### 与终端一致（extensions）
-
-早期版本用 `--no-extensions` 拉起后台服务，只有本插件能加载，结果 QQ 里没有记忆、不能联网、
-用不了子代理，而且从报错里看不出原因。0.3.0 改成读 `pi list` 拼白名单，仍然漏掉了内置扩展，
-也不尊重 `pi config` 里禁用的包。
-
-0.4.0 起默认 `extensions: "auto"`：**不加任何扩展参数，让 Pi 自己走完整发现流程**——
-内置扩展、`settings.json` 里的包、`~/.pi/agent/extensions`、项目 `.pi/extensions`、
-技能、提示模板、主题、`AGENTS.md`，与终端会话完全同一套。
-
-```json
-{ "extensions": "auto" }
-{ "extensions": "none" }
-{ "extensions": ["npm:pi-hermes-memory", "npm:pi-web-access", "builtin:tool-search"] }
-```
-
-- 本插件被自动发现与显式 `--extension` 同时命中时：同一个 `pi` 对象只注册一次（`WeakSet`）；
-  如果 pi 给了两个不同的对象，就按 `session_start` 的同一个 `ctx` 选举一个负责人，事件和命令都只走它。
-- `"none"` 是隔离模式（QQ 里只有本插件的能力）；数组是白名单，`builtin:` 原样透传。
-- 代价：加载得越多，每轮系统提示越长，QQ 每条消息越费 token。只想聊天就设 `"none"`。
-- 改了这项要重启后台服务才生效（`/qq stop` 再 `/qq start`，或 `systemctl --user restart`）。
-- 排查「QQ 里为什么没有某个插件」：
-
-  ```bash
-  pi-qq-connect --dry-run          # 打印真正会执行的 pi 参数
-  pi list                          # 已安装的包
-  tail -5 ~/.pi/agent/pi-qq-connect.log
-  ```
-
-### 长回答
-
-QQ 每条被动回复最多 5 次、单段 4000 字量级。回答超过分片上限时，插件把完整正文写成
-`~/.pi/agent/qq-replies/reply-<时间>-<随机>.md` 随回复一起发出去，正文只发前几段并注明
-「全文见附件」；落盘失败自动退回截断。想保持 0.3.0 的截断行为就设 `"overflow": "truncate"`。
-
-## 必须知道的限制
-
-- **只能被动回复**：QQ 在 2025-04-21 下线了主动消息。群聊 5 分钟内最多 5 次、单聊 60 分钟内
-  最多 4 次。插件按场景取上限、超时改用同会话最新消息的 `msg_id`。
-- **等待太久会过期**：模型跑超过窗口（群 5 分钟）就可能发不回去；要么把模型调快，要么在群里再发一句。
-- **一个会话**：所有 QQ 对话共用同一条 Pi 上下文，互相可见（所以有信封头）。
-- **安全**：等于把这台机器上的 agent 交给拿到 openid 的人。`allowAll` 只用于调试，正式使用填
-  `allowUsers`。配置里有明文密钥，文件权限务必 600。
-
-## 排错
-
-| 现象 | 处理 |
-|---|---|
-| `/qq status` 显示「未配置」 | 没填 appId/clientSecret，或 JSON 写坏了 |
-| 「被占用 pid x」 | 另一个 pi 进程持有网关；关掉那个 pi 进程后重试 |
-| 网关一直「重连中」 | `/qq log 50`：4004 凭据错、4008 限流、4013/4014 intents 没开、4914/4915 沙箱/封禁 |
-| QQ 里没反应 | 群聊必须 @；确认 `allowUsers`/`allowGroups` 里有你的 openid |
-| 回复「消息发送超频」 | 触发回复上限或窗口过期，等用户再发一条 |
-| `/new` 后 QQ 消息没反应 | 0.4.1 起新会话实例会自动接棒；用 `/qq status` 看队列是否显示「已暂停，等新会话接棒」，必要时 `/qq stop` 再 `/qq start` |
-| 某个插件在 QQ 里不生效 | `pi-qq-connect --dry-run` 看启动参数；确认 `extensions` 不是 `none`，且该包在 `pi config` 里是启用的 |
-| 文件发送失败 | 日志里有 `err_code` 和 `trace_id`；常见 40093006 是合并参数、850031 是超大小 |
-
-## 开发
-
-```bash
-npm test                  # node --test test/：命令、启动参数、切换暂存、长回答落盘
-pi-qq-connect --dry-run   # 打印会执行的 pi 参数（不启动）
-```
-
-- 架构与协议细节：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- 开发副本与发布流程：[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
-- 决策与历史：[`docs/PLAN.md`](docs/PLAN.md)
-
-零运行时依赖；`npm install` 不会装任何东西。测试用 `test/mock-qq.mjs`（HTTP + 最小
-WebSocket 服务端），不接触真实 QQ。
-
-## 参考
-
-协议与边界处理参考了 Hermes Agent 的 QQ Bot 适配器与本机实测：媒体 CDN 需带 QQBot token、
-代码围栏分片、随机 `msg_seq`、typing、引用消息、限流/关闭码分类、入站去重。
-QQ 官方文档：<https://bot.q.qq.com/wiki/develop/api-v2/>。
+- Passive replies only: 4 per message in private chat (60 min window), 5 in groups
+- QQ drops the WebSocket after roughly 30 minutes of inactivity; the client reconnects
+- No Markdown rendering on the QQ side
 
 ## License
 

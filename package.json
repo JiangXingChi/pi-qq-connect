@@ -1,6 +1,6 @@
 {
 	"name": "pi-qq-connect",
-	"version": "0.5.0",
+	"version": "0.5.1",
 	"description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻，聊天里只映射 /new（Linux）",
 	"type": "module",
 	"license": "MIT",
@@ -44,7 +44,6 @@
 		"docs/DEVELOPMENT.md",
 		"docs/PLAN.md",
 		"README.md",
-		"README.en.md",
 		"LICENSE",
 		"CHANGELOG.md"
 	],
