@@ -51,19 +51,19 @@ export class QqAuth {
 				signal: AbortSignal.timeout(15_000),
 			});
 		} catch (err) {
-			throw new QqAuthError(`token 请求失败：${this.redact(err?.message ?? String(err))}`);
+			throw new QqAuthError(`token request failed: ${this.redact(err?.message ?? String(err))}`);
 		}
 		let body;
 		try {
 			body = await res.json();
 		} catch {
-			throw new QqAuthError(`token 响应不是 JSON（HTTP ${res.status}）`);
+			throw new QqAuthError(`token response is not JSON (HTTP ${res.status})`);
 		}
 		if (!res.ok || !body?.access_token) {
 			// token 接口失败也返回 HTTP 200，错误码在 body.code 里
 			const status = body?.code !== undefined ? `code ${body.code}` : `HTTP ${res.status}`;
-			const detail = body?.message ? `：${this.redact(body.message)}` : "";
-			throw new QqAuthError(`取 token 失败（${status}）${detail}`);
+			const detail = body?.message ? `: ${this.redact(body.message)}` : "";
+			throw new QqAuthError(`token fetch failed (${status})${detail}`);
 		}
 		const seconds = Number(body.expires_in ?? 7200) || 7200;
 		this.token = body.access_token;

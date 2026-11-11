@@ -19,6 +19,8 @@ import { DEFAULT_CONFIG, normalizeConfig } from "../src/config.js";
 
 const run = promisify(execFile);
 const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "pi-qq-connect.mjs");
+// 启动器给自身用的稳定绝对路径（包根目录，不是目录名）
+const selfRoot = path.resolve(path.dirname(bin), "..");
 
 function tempConfig(content) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piqq-cfg-"));
@@ -75,10 +77,10 @@ test("数组：显式挂载，builtin: 原样透传，自身不重复", async ()
 	);
 	assert.equal(plan.args.includes("--no-extensions"), true);
 	const extensions = plan.args.filter((arg, index) => plan.args[index - 1] === "--extension");
-	assert.equal(extensions[0], plan.args[plan.args.indexOf("--extension") + 1], "自身在最前");
+	assert.equal(extensions[0], selfRoot, "自身在最前，且用绝对路径");
 	assert.ok(extensions.includes("builtin:tool-search"));
-	// 自身被跳过：pi-qq-connect 只出现一次路径（显式那个）
-	const selfCount = extensions.filter((value) => value.includes("pi-qq-connect")).length;
+	// 自身被跳过：配置里的 pi-qq-connect 不再重复挂，包根路径只出现一次
+	const selfCount = extensions.filter((value) => value === selfRoot).length;
 	assert.equal(selfCount, 1);
 	// CI 里没装 pi 时 `pi list` 读不到，只能验证内置扩展透传与「不重复挂自身」
 	const hasPi = await hasPiBinary();

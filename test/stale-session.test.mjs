@@ -100,9 +100,22 @@ test("P1 stale 注入只暂停，接棒后恢复", async (t) => {
 		assert.equal(staleLines.length, 1, `stale 记录 ${staleLines.length} 条`);
 		assert.equal(logs.filter((l) => l.message.includes("等空闲后重试")).length, 0);
 	});
-	await t.test("提示不再要求用户手动 /qq stop", () => {
-		assert.ok(notes.some((n) => n.includes("自动恢复")), "缺少自动恢复提示");
-		assert.ok(sends.some((s) => String(s.content).includes("接棒")), "缺少给 QQ 的提示");
+	await t.test("提示自动恢复，且不再要求用户手动 /qq stop", () => {
+		assert.ok(
+			notes.some((n) => /\[QQ_E_BRIDGE_PAUSED\]/.test(n) && /resumes when the new session takes over/.test(n)),
+			"缺少自动恢复提示",
+		);
+		assert.ok(
+			sends.some(
+				(s) => /pi session switched/.test(String(s.content)) && /retry automatically/.test(String(s.content)),
+			),
+			"缺少给 QQ 的提示",
+		);
+		assert.equal(
+			[...notes, ...sends.map((s) => String(s.content))].some((text) => /\/qq stop/.test(text)),
+			false,
+			"不应要求用户手动 /qq stop",
+		);
 	});
 
 	await t.test("新实例接手后自动恢复（走生产路径 adopt + endSwitch）", async () => {
@@ -167,6 +180,7 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
 	const state = mod.default(fake.pi);
 
 	const notifications = [];
+	const statuses = [];
 	let nextCtx;
 	const makeCtx = () => {
 		const ctx = {
@@ -175,7 +189,9 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
 				notify(message, level) {
 					notifications.push({ message, level });
 				},
-				setStatus() {},
+				setStatus(key, text) {
+					statuses.push({ key, text });
+				},
 			},
 		};
 		nextCtx = ctx;
@@ -187,13 +203,12 @@ test("P2 session_start 没有活动桥时自愈", async (t) => {
 	const firstCtx = makeCtx();
 	await fake.emit("session_start", { reason: "new" }, firstCtx);
 
-	await t.test("无桥时提示并尝试重建（start 被执行）", async () => {
-		await waitFor(() => notifications.some((n) => n.message.includes("enabled=false")), {
-			label: "start() 走到 enabled=false 分支",
-		});
+	await t.test("无桥时重建（start() 跑到 enabled=false 分支）", async () => {
+		// 启动类提示现在只进日志，能观察的是 start() 的副作用：读到配置 + 状态栏 disabled
+		await waitFor(() => state.config?.enabled === false, { label: "start() 读到配置" });
 		assert.ok(
-			notifications.some((n) => n.message.includes("当前没有活动桥")),
-			"缺少重建提示",
+			statuses.some((s) => s.key === "qqbot" && /disabled/.test(s.text)),
+			"start() 应把状态栏设为 disabled",
 		);
 	});
 	await t.test("state.ctx 指向新会话上下文", () => assert.equal(state.ctx, firstCtx));

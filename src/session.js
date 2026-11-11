@@ -13,6 +13,7 @@ import path from "node:path";
 
 import { parseFileMarkers, uploadFile } from "./media.js";
 import { buildPrompt, chatKey, chunkText, isAllowed, maskId, replyTarget, stripMarkdown } from "./text.js";
+import { CODE, err } from "./i18n.js";
 import { parseCommand } from "./commands.js";
 
 /**
@@ -227,7 +228,7 @@ export class QqBridge {
 		if (inflight) {
 			this.log.warn(`会话切换时有一条消息正在生成回答，该回答随旧会话丢弃（chat=${maskId(inflight.item.chatId)}）`);
 			// 别让用户对着空气等：明确告诉他这条要重发
-			void this.reply(inflight.item, "⚠️ 会话已切换，刚才这条请求被中断了，请重发一次。");
+			void this.reply(inflight.item, "session switched; that request was interrupted, please send it again.");
 		}
 		this.#restore([...kept, ...deferred], "会话切换完成");
 	}
@@ -339,8 +340,18 @@ export class QqBridge {
 				return;
 			}
 			if (result.forward) {
-				// 技能/提示模板/其它插件的命令：交给 Pi 展开执行，算一次正常提问
-				item.expandTemplates = true;
+				// 技能/提示模板：原样交给 Pi 展开；像命令的普通文本（/tmp…）保留信封与附件
+				if (this.queue.length >= this.cfg.maxQueue) {
+					this.stats.ignored++;
+					this.log.warn(`转发队列已满（${this.cfg.maxQueue}），丢弃一条消息`);
+					return;
+				}
+				if (result.asText) {
+					item.asText = true;
+					item.expandTemplates = false;
+				} else {
+					item.expandTemplates = true;
+				}
 				this.queue.push(item);
 				void this.pump();
 				return;
@@ -348,7 +359,7 @@ export class QqBridge {
 			await this.reply(item, result.text ?? "");
 		} catch (err) {
 			this.log.error(`命令执行失败：${err?.stack ?? err}`);
-			await this.reply(item, `命令执行失败：${err?.message ?? err}`).catch(() => {});
+			await this.reply(item, `command failed: ${err?.message ?? err}`).catch(() => {});
 		}
 	}
 
@@ -462,7 +473,9 @@ export class QqBridge {
 		}
 		const prompt = String(event?.prompt ?? "").trim();
 		if (!prompt) return;
-		if (prompt !== inflight.promptText.trim()) {
+		// 技能/提示模板会被 Pi 展开，event.prompt 是展开后的正文，不能按原文比对
+		const expanded = Boolean(inflight.item?.expandTemplates);
+		if (!expanded && prompt !== inflight.promptText.trim()) {
 			inflight.foreign = true;
 			this.log.warn("本轮是终端里输入的消息，跳过收集");
 			return;
@@ -525,9 +538,9 @@ export class QqBridge {
 			}
 			const text = inflight.texts.join("\n\n").trim() || this.cfg.emptyReply;
 			await this.#deliver(inflight, text);
-		} catch (err) {
-			this.log.error(`回复失败：${err?.stack ?? err}`);
-			this.notify(`QQ 回复失败：${err?.message ?? err}`, "warning");
+		} catch (cause) {
+			this.log.error(`回复失败：${cause?.stack ?? cause}`);
+			this.notify(err(CODE.REPLY_FAILED, "failed to send QQ reply", cause?.message ?? cause), "warning");
 		} finally {
 			this.finishing = false;
 			void this.pump();
@@ -567,7 +580,7 @@ export class QqBridge {
 		const generation = this.generation;
 		const item = this.queue.shift();
 		// 兜底：命令无论从哪条路径进了队列，都不能当普通提问喂给模型
-		if (!item.expandTemplates) {
+		if (!item.expandTemplates && !item.asText) {
 			const command = parseCommand(item.text);
 			if (command) {
 				this.log.info(`队列里发现命令 /${command.name}，改走命令通道`);
@@ -625,18 +638,26 @@ export class QqBridge {
 			this.#armInjectWatchdog(inflight);
 			this.#armAck(inflight);
 			this.#startTyping(inflight);
-		} catch (err) {
+		} catch (cause) {
 			const inflight = this.inflight;
 			this.inflight = undefined;
-			if (isStaleContextError(err)) {
+			if (isStaleContextError(cause)) {
 				// 会话已被替换：旧 pi 句柄永久失效，重试多少次都不会成功
-				this.#failOnStale(item, err, inflight);
+				this.#failOnStale(item, cause, inflight);
+				return;
+			}
+			// 同一条消息同步注入失败最多重试 3 次，之后丢弃并告知，避免永久占住队首
+			item.injectFailures = (item.injectFailures ?? 0) + 1;
+			if (item.injectFailures > 3) {
+				this.stats.failed++;
+				this.log.error(`注入失败 ${item.injectFailures} 次，丢弃：${cause?.message ?? cause}`);
+				this.notify(err(CODE.INJECT_FAILED, "could not hand this QQ message to pi; it was dropped", cause?.message ?? cause), "warning");
 				return;
 			}
 			// 可能刚好在流式输出中：放回队首，等 agent_settled 或定时器再试
 			this.queue.unshift(item);
 			this.injecting = true;
-			this.log.warn(`注入失败，等空闲后重试：${err?.message ?? err}`);
+			this.log.warn(`注入失败，等空闲后重试：${cause?.message ?? cause}`);
 			this.#scheduleRetry();
 		}
 	}
@@ -648,8 +669,8 @@ export class QqBridge {
 	 * adopt() 接棒。所以这里只暂停：保留队列、网关和切换状态（switching/deferred 归
 	 * endSwitch/cancelSwitch 管），回一条提示，等新实例接手后自动继续。
 	 */
-	#failOnStale(item, err, inflight) {
-		const reason = err?.message ?? String(err);
+	#failOnStale(item, cause, inflight) {
+		const reason = cause?.message ?? String(cause);
 		const first = !this.stale;
 		this.stale = true;
 		if (first) this.log.error(`会话已被替换，暂停注入直到新会话实例接棒：${reason}`);
@@ -666,7 +687,7 @@ export class QqBridge {
 		try {
 			const sending = this.api?.sendText?.(
 				replyTarget(item),
-				"⚠️ Pi 会话已切换，QQ 桥正在等新会话接棒；刚才这条会在接棒后自动重试。",
+				"pi session switched; the QQ bridge is waiting for the new session and will retry automatically.",
 				{ msgId: item.msgId, msgSeq: this.#nextSeq({ seqs: new Set(), attemptsLeft: 1 }) },
 			);
 			if (sending && typeof sending.catch === "function") {
@@ -675,7 +696,7 @@ export class QqBridge {
 		} catch {
 			// 网关可能已经不可用，回执失败不影响接棒
 		}
-		this.notify("QQ 桥已暂停：Pi 会话被替换，等新会话接手后自动恢复", "warning");
+		this.notify(err(CODE.BRIDGE_PAUSED, "QQ bridge paused: pi session was replaced; it resumes when the new session takes over"), "warning");
 	}
 
 	#scheduleRetry() {
@@ -712,7 +733,7 @@ export class QqBridge {
 				inflight.item.injectRetried = true;
 				this.queue.unshift(inflight.item);
 			} else {
-				this.notify("QQ 消息注入 Pi 失败（模型没有开始执行），请重发", "warning");
+				this.notify(err(CODE.INJECT_FAILED, "failed to inject the QQ message into pi (model did not start); send it again"), "warning");
 			}
 			void this.pump();
 		}, this.injectTimeoutMs);
@@ -732,7 +753,7 @@ export class QqBridge {
 			inflight.attemptsLeft--;
 			const seq = this.#nextSeq(inflight);
 			void this.api
-				.sendText(replyTarget(inflight.item), "收到，正在处理…", { msgId: inflight.item.msgId, msgSeq: seq })
+				.sendText(replyTarget(inflight.item), "got it, working on it...", { msgId: inflight.item.msgId, msgSeq: seq })
 				.catch((err) => this.log.warn(`回执发送失败：${err?.message ?? err}`));
 		}, delay);
 		this.ackTimer.unref?.();
@@ -801,7 +822,7 @@ export class QqBridge {
 	/** 发送失败重试 2 次（1s/2s）；同一条内容复用同一个 msg_seq，重复即视为已送达。 */
 	async #sendWithRetry(inflight, send, { attempts = 3 } = {}) {
 		if (inflight.attemptsLeft <= 0) {
-			throw new Error(`被动回复额度已用完（每条消息最多 ${inflight.quotaMax} 次）`);
+			throw new Error(`reply quota exhausted (max ${inflight.quotaMax} per message)`);
 		}
 		const seq = this.#nextSeq(inflight);
 		let charged = false;
@@ -869,7 +890,7 @@ export class QqBridge {
 		if (this.stopped) return;
 		const online = await this.#waitOnline();
 		if (this.stopped) return;
-		if (!online) this.notify("QQ 网关离线，回复可能发送失败", "warning");
+		if (!online) this.notify(err(CODE.GATEWAY_OFFLINE, "QQ gateway is offline; the reply may fail to send"), "warning");
 		const { item } = inflight;
 		const msgId = this.#resolveMsgId(item);
 		const markdown = this.cfg.replyFormat === "markdown";
@@ -907,7 +928,7 @@ export class QqBridge {
 			? chunkText(body, {
 					chunkChars: this.cfg.chunkChars,
 					maxChunks: Math.min(this.cfg.maxChunks, textSlots),
-					overflowHint: overflowed ? "……（全文见附件）" : undefined,
+					overflowHint: overflowed ? "... (see attachment for the full text)" : undefined,
 				})
 			: [];
 		if (chunks.length === 0 && filesToSend.length === 0) {
@@ -947,10 +968,10 @@ export class QqBridge {
 				}
 				sent++;
 				this.stats.sent++;
-			} catch (err) {
+			} catch (cause) {
 				this.stats.failed++;
-				this.log.error(`第 ${index + 1} 段发送失败：${err?.message ?? err}`);
-				this.notify(`QQ 回复失败（第 ${index + 1} 段）：${err?.message ?? err}`, "warning");
+				this.log.error(`第 ${index + 1} 段发送失败：${cause?.message ?? cause}`);
+				this.notify(err(CODE.REPLY_FAILED, `failed to send QQ reply (part ${index + 1})`, cause?.message ?? cause), "warning");
 				break;
 			}
 		}
@@ -978,15 +999,15 @@ export class QqBridge {
 					sentFiles++;
 					this.stats.sent++;
 					this.log.info(`已发送文件 ${uploaded.name} 到 ${logChat(item)}`);
-				} catch (err) {
+				} catch (cause) {
 					this.stats.failed++;
-					this.log.error(`文件发送失败 ${file}：${err?.message ?? err}`);
-					this.notify(`QQ 文件发送失败：${err?.message ?? err}`, "warning");
+					this.log.error(`文件发送失败 ${file}：${cause?.message ?? cause}`);
+					this.notify(err(CODE.FILE_SEND_FAILED, "failed to send QQ file", cause?.message ?? cause), "warning");
 				}
 			}
 			if (sentFiles === 0 && sent === 0 && !this.stopped) {
 				await this.#sendWithRetry(inflight, (seq) =>
-					this.api.sendText(target, "文件发送失败，请查看 Pi 终端日志", { msgId, msgSeq: seq }),
+					this.api.sendText(target, "file send failed; check the Pi terminal log", { msgId, msgSeq: seq }),
 				).catch((err) => this.log.warn(`文件失败兜底也没发出去：${err?.message ?? err}`));
 			}
 			this.log.info(`已发送文件 ${sentFiles}/${filesToSend.length} 个到 ${logChat(item)}`);

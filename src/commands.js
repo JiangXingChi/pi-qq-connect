@@ -12,7 +12,7 @@
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /** 由本模块处理的命令：命中就不进模型。 */
-export const QQ_SIDE = new Set(["new", "model", "thinking", "compact", "session", "name", "tools", "help"]);
+export const QQ_SIDE = new Set(["new"]);
 
 /**
  * Pi 的 TUI 专用内置命令：QQ 里没有等价实现，明确拒绝比当成提问喂给模型好。
@@ -41,18 +41,11 @@ export const TUI_ONLY = new Set([
 ]);
 
 export const HELP_TEXT = [
-	"QQ 里的命令（与终端一致）：",
-	"  /new [名称]      开新会话",
-	"  /model           列模型；/model 3 或 /model provider/id 切换",
-	"  /thinking        看思考级别；/thinking high 切换",
-	"  /compact [说明]  压缩上下文",
-	"  /session         模型、思考级别、上下文用量、会话名",
-	"  /name [名称]     设置会话名",
-	"  /tools           当前启用的工具",
-	"  /help            这张表",
+	"QQ chat commands:",
+	"  /new [name]   start a new session",
 	"",
-	"技能、提示模板和其它插件的命令（如 /skill:a-stock-data）直接发即可。",
-	"插件自身的命令：/qq status、/qq log（start/stop/take 要在终端执行）。",
+	"Everything else runs in the terminal.",
+	"Skills and prompt templates also work when sent as normal text.",
 ].join("\n");
 
 /** `/model 3`、`/thinking high  ` → {name, args, raw}；不是命令返回 null。 */
@@ -225,9 +218,9 @@ export function createCommandRunner({ getPi, getCtx, newSession, notify }) {
 		switch (name) {
 			case "new": {
 				const result = await newSession(args);
-				if (result?.cancelled) return "开新会话被取消";
-				if (!result?.ok) return `开新会话失败：${result?.message ?? "未知原因"}`;
-				return args ? `✅ 已开新会话（${args}）` : "✅ 已开新会话";
+				if (result?.cancelled) return "new session cancelled";
+				if (!result?.ok) return `could not open a new session: ${result?.message ?? "unknown reason"}`;
+				return args ? `✅ new session started (${args})` : "✅ new session started";
 			}
 			case "model":
 				return args ? selectModel(args) : listModels();

@@ -36,7 +36,7 @@ export const DEFAULT_CONFIG = Object.freeze({
 	chunkChars: 4000,
 	typing: true,
 	maxQueue: 20,
-	emptyReply: "（Pi 这轮没有返回文字）",
+	emptyReply: "(pi returned no text this round)",
 	ackAfterMs: 0, // >0 时，任务超过该毫秒数先回一条「收到」
 	dedupeTtlMs: 10 * 60 * 1000,
 	passiveWindowSec: { group: 300, private: 3600 },
@@ -108,7 +108,7 @@ export function readRawConfig(file = configPath()) {
 		const raw = JSON.parse(text);
 		return { raw: raw && typeof raw === "object" ? raw : {}, exists: true };
 	} catch (err) {
-		throw new Error(`配置文件不是合法 JSON（${file}）：${err.message}`);
+		throw new Error(`config file is not valid JSON (${file}): ${err.message}`);
 	}
 }
 
@@ -178,11 +178,11 @@ function applyEnv(cfg) {
 }
 
 export function validateConfig(cfg) {
-	if (!cfg.appId) return "缺少 appId（QQ 开放平台的应用 AppID）";
-	if (!/^\d{5,}$/.test(cfg.appId)) return `appId 看起来不对：应为纯数字，当前是 "${cfg.appId}"`;
-	if (!cfg.clientSecret) return "缺少 clientSecret（QQ 开放平台的应用密钥）";
+	if (!cfg.appId) return "missing appId (QQ open platform application id)";
+	if (!/^\d{5,}$/.test(cfg.appId)) return `invalid appId (digits only): "${cfg.appId}"`;
+	if (!cfg.clientSecret) return "missing clientSecret (QQ open platform application secret)";
 	if (!cfg.allowAll && cfg.allowUsers.length === 0 && cfg.allowGroups.length === 0) {
-		return "allowUsers / allowGroups 都为空：请填入允许使用的 openid，或设 allowAll=true 明确放行所有人";
+		return "allowUsers and allowGroups are empty: add allowed openids or set allowAll=true";
 	}
 	return null;
 }
@@ -206,6 +206,6 @@ export function loadConfig(file = configPath()) {
 	if (config.files?.enabled && config.files.allowDirs.length === 0) {
 		warnings.push("files.allowDirs 为空：除内置敏感路径外，任意路径都能被 [[file:...]] 发送；建议限定目录");
 	}
-	const error = exists ? validateConfig(config) : `配置文件不存在：${file}`;
+	const error = exists ? validateConfig(config) : `config file not found: ${file}`;
 	return { config, path: file, exists, warnings, error };
 }

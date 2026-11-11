@@ -17,7 +17,7 @@ import {
 	readServiceState,
 	removeServiceState,
 	serviceStatePath,
-	startService,
+	startManagedService,
 	stopService,
 } from "./service.js";
 import { Logger } from "./log.js";
@@ -27,7 +27,8 @@ import { QqGateway } from "./gateway.js";
 import { QqBridge, isStaleContextError } from "./session.js";
 import { acquireLock, readLock, releaseLock } from "./lock.js";
 import { maskAppId, maskId, normalizeEvent } from "./text.js";
-import { HELP_TEXT, TUI_ONLY, createCommandRunner } from "./commands.js";
+import { HELP_TEXT, createCommandRunner } from "./commands.js";
+import { CODE, err } from "./i18n.js";
 
 const SERVICE_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "pi-qq-connect.mjs");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -49,15 +50,15 @@ function lockFilePath() {
 }
 
 const STATE_LABEL = {
-	idle: "未启动",
-	connecting: "连接中",
-	connected: "在线",
-	disconnected: "重连中",
-	error: "出错",
-	stopped: "已停止",
-	disabled: "已关闭",
-	unconfigured: "未配置",
-	locked: "被占用",
+	idle: "not started",
+	connecting: "connecting",
+	connected: "online",
+	disconnected: "reconnecting",
+	error: "error",
+	stopped: "stopped",
+	disabled: "disabled",
+	unconfigured: "unconfigured",
+	locked: "locked",
 };
 
 const RUNTIME_KEY = Symbol.for("pi-qq-connect.runtime.v1");
@@ -125,8 +126,10 @@ export default function createExtension(pi) {
 		}
 	}
 
-	function notify(message, level = "info") {
+	function notify(message, level = "info", { silent = false } = {}) {
 		state.logger?.[level === "warning" ? "warn" : level === "error" ? "error" : "info"](message);
+		// startup / background status notices stay in the log only
+		if (silent) return;
 		try {
 			state.ctx?.ui?.notify?.(message, level);
 		} catch {
@@ -153,7 +156,7 @@ export default function createExtension(pi) {
 			state.lockWatch = undefined;
 		}
 		if (state.pendingExec) {
-			state.pendingExec.done({ ok: false, message: "后台服务已停止" });
+			state.pendingExec.done({ ok: false, message: "background service stopped" });
 			state.pendingExec = undefined;
 		}
 		try {
@@ -181,14 +184,14 @@ export default function createExtension(pi) {
 				},
 			});
 			if (result?.cancelled) {
-				notify("开新会话被取消", "warning");
-				return { ok: false, cancelled: true, message: "被取消" };
+				notify(err(CODE.NEW_SESSION_FAILED, "new session cancelled"), "warning");
+				return { ok: false, cancelled: true, message: "cancelled" };
 			}
 			return { ok: true };
 		} catch (err) {
 			if (isStaleContextError(err)) {
 				// 旧句柄已失效：新会话其实已经开成，出问题的是桥
-				return { ok: false, message: "这个会话已经被另一次切换替换了，QQ 桥会在新会话里自动接棒" };
+				return { ok: false, message: "this session was replaced by another switch; the QQ bridge takes over in the new session" };
 			}
 			return { ok: false, message: err?.message ?? String(err) };
 		}
@@ -202,7 +205,7 @@ export default function createExtension(pi) {
 	function requestNewSession(args = "") {
 		if (state.pendingExec) {
 			// 连发两次 /new 时别互相踩：后一个直接拒绝，避免把前一个的暂存队列解开
-			return Promise.resolve({ ok: false, message: "上一个开新会话还在进行中，稍等一下" });
+			return Promise.resolve({ ok: false, message: "a new session is already in progress; wait a moment" });
 		}
 		return new Promise((resolve) => {
 			let settled = false;
@@ -222,7 +225,7 @@ export default function createExtension(pi) {
 			};
 			// 略长于 session.js 的 30 秒切换看门狗：看门狗先恢复队列，这里再清掉 pendingExec；
 			// 31~35 秒之间发 /new 仍会被「上一个还在进行中」挡住，可接受
-			const timer = setTimeout(() => done({ ok: false, message: "Pi 35 秒内没有完成会话切换（可能正忙）" }), 35_000);
+			const timer = setTimeout(() => done({ ok: false, message: "pi did not finish switching sessions within 35s (it may be busy)" }), 35_000);
 			timer.unref?.();
 			state.pendingExec = { done };
 			state.bridge?.beginSwitch();
@@ -235,22 +238,56 @@ export default function createExtension(pi) {
 		});
 	}
 
-	/** QQ 里发来的斜杠命令：本插件处理 / 桌面命令 / 拒绝 TUI 专用命令 / 转发给 Pi。 */
+	const BUILTIN_COMMANDS = new Set([
+		"settings",
+		"model",
+		"tree",
+		"thinking",
+		"scoped-models",
+		"export",
+		"import",
+		"share",
+		"bug",
+		"copy",
+		"name",
+		"session",
+		"changelog",
+		"hotkeys",
+		"fork",
+		"clone",
+		"trust",
+		"login",
+		"logout",
+		"new",
+		"compact",
+		"resume",
+		"reload",
+		"quit",
+		"help",
+		"tools",
+	]);
+
+	function isExtensionCommand(name) {
+		try {
+			return (state.extensionApi?.getCommands?.() ?? []).some((item) => String(item.name).toLowerCase() === name);
+		} catch {
+			return false;
+		}
+	}
+
+	/** QQ 里发来的斜杠命令：只映射 /new，其余存在但不可在聊天用的提示回终端。 */
 	async function handleCommand(command) {
-		if (command.name === "qq") return { text: handleQqSubcommand(command.args) };
 		const local = await state.runner?.run(command);
 		if (local !== null && local !== undefined) return { text: local };
-		if (TUI_ONLY.has(command.name)) {
-			return { text: `「/${command.name}」只能在终端里用。QQ 里可用：/new /model /thinking /compact /session /name /tools /help` };
+		const name = command.name;
+		// 控制类命令只在终端用；`/new` 已由 runner 处理
+		if (name === "qq" || name === "wx" || BUILTIN_COMMANDS.has(name)) {
+			return { text: err(CODE.TUI_ONLY, `/${name} runs in the terminal; only /new works here`) };
 		}
-		let known = false;
-		try {
-			known = (state.extensionApi?.getCommands?.() ?? []).some((item) => item.name === command.name);
-		} catch {
-			known = false;
-		}
-		if (known) return { forward: true };
-		return { text: `不认识的命令 /${command.name}。发 /help 看 QQ 里能用的命令。` };
+		// 技能、提示模板、其它扩展命令：原样交给 Pi 展开
+		if (isExtensionCommand(name)) return { forward: true };
+		// 其余 `/...`（如 `/tmp 为什么…`）当普通消息，保留附件与引用
+		return { forward: true, asText: true };
 	}
 
 	/** /qq 在 QQ 里只回放能纯文本回答的子命令，改机器状态的仍留给终端。 */
@@ -261,14 +298,14 @@ export default function createExtension(pi) {
 				return statusReport();
 			case "log": {
 				const n = Number(rest[0]) > 0 ? Math.min(Number(rest[0]), 200) : 20;
-				return state.logger?.tail(n)?.join("\n") ?? "（没有日志）";
+				return state.logger?.tail(n)?.join("\n") ?? "(no log)";
 			}
 			case "help":
 				return HELP_TEXT;
 			case "new":
-				return "「/qq new」已并入「/new」，直接发 /new 即可";
+				return "/qq new is merged into /new; just send /new";
 			default:
-				return `「/qq ${sub}」要在终端里执行（会用终端切换到前后台服务）。QQ 里可用：/qq status、/qq log [n]`;
+				return `/qq ${sub} runs in the terminal (it switches the local service). Available in QQ: /qq status, /qq log [n]`;
 		}
 	}
 
@@ -293,14 +330,14 @@ export default function createExtension(pi) {
 			if (!exists || error) {
 				state.error = error;
 				setStatus(STATE_LABEL.unconfigured, path.basename(configFile));
-				notify(`pi-qq-connect: ${error}\n示例配置见项目内 examples/config.json`, "warning");
+				notify(err(CODE.NO_CONFIG, "config error", `${error}; see examples/config.json`), "warning");
 				return;
 			}
-			for (const warning of warnings) notify(`pi-qq-connect: ${warning}`, "info");
+			for (const warning of warnings) notify(warning, "info", { silent: true });
 
 			if (!config.enabled) {
 				setStatus(STATE_LABEL.disabled);
-				notify("pi-qq-connect: 配置里 enabled=false，未连接", "info");
+				notify("config has enabled=false; not connected", "info", { silent: true });
 				return;
 			}
 
@@ -310,8 +347,8 @@ export default function createExtension(pi) {
 			const serviceAlive = Boolean(service && isServiceAlive(service));
 			const iAmService = isServiceProcess(service);
 			if (serviceAlive && !iAmService) {
-				setStatus("服务在线", `pid ${service.pid}`);
-				notify(`pi-qq-connect: 后台服务在线（pid ${service.pid}），本进程不连网关。用 /qq status 查看`, "info");
+				setStatus("service online", `pid ${service.pid}`);
+				notify(`background service online (pid ${service.pid}); this process does not connect the gateway; see /qq status`, "info", { silent: true });
 				return;
 			}
 
@@ -323,17 +360,17 @@ export default function createExtension(pi) {
 					lock = acquireLock(lockFilePath());
 				}
 				if (!lock.ok) {
-					state.error = `网关已被另一个 Pi 进程持有（pid ${lock.holder?.pid}）`;
+					state.error = `gateway held by another Pi process (pid ${lock.holder?.pid})`;
 					setStatus(STATE_LABEL.locked, `pid ${lock.holder?.pid}`);
-					notify(`pi-qq-connect: ${state.error}。关掉那个进程，或在终端运行 /qq take 强制接管。`, "warning");
+					notify(err(CODE.LOCK_HELD, "gateway held by another Pi process", `pid ${lock.holder?.pid}; close that Pi process and retry`), "warning");
 					return;
 				}
-				if (lock.takenOver) notify("pi-qq-connect: 已强制接管网关", "info");
+				if (lock.takenOver) notify("took over the gateway lock", "info", { silent: true });
 				// 别的进程 /qq take 后，这里要让出网关，否则两个进程各收一半消息
 				state.lockWatch = setInterval(() => {
 					const holder = readLock(lockFilePath());
 					if (holder && holder.pid !== process.pid) {
-						notify(`pi-qq-connect: 网关已被 pid ${holder.pid} 接管，本进程断开`, "warning");
+						notify(err(CODE.LOCK_TAKEN, "gateway taken over by another process", `pid ${holder.pid}; disconnecting`), "warning");
 						stop({ release: false });
 						setStatus(STATE_LABEL.locked, `pid ${holder.pid}`);
 					}
@@ -344,7 +381,7 @@ export default function createExtension(pi) {
 			// 配置里有明文密钥：权限过宽时提醒一次
 			try {
 				const mode = fs.statSync(configFile).mode & 0o777;
-				if (mode & 0o077) notify(`pi-qq-connect: 配置权限是 0${mode.toString(8)}，建议 chmod 600 ${configFile}`, "warning");
+				if (mode & 0o077) notify(err(CODE.CONFIG_PERM, "config file is too permissive", `0${mode.toString(8)}; chmod 600 ${configFile}`), "warning");
 			} catch {
 				// ignore
 			}
@@ -419,78 +456,81 @@ export default function createExtension(pi) {
 		const cfg = state.config;
 		const lines = [];
 		const lock = readLock(lockFilePath());
-		lines.push(`配置：${configPath()}${cfg ? "" : "（未加载）"}`);
-		if (state.error) lines.push(`错误：${state.error}`);
+		lines.push(`config: ${configPath()}${cfg ? "" : " (not loaded)"}`);
+		if (state.error) lines.push(`error: ${state.error}`);
 		if (!cfg) return lines.join("\n");
-		lines.push(`环境：${cfg.sandbox ? "沙箱" : "正式"} · AppID ${maskAppId(cfg.appId)}`);
+		lines.push(`env: ${cfg.sandbox ? "sandbox" : "production"} · appid ${maskAppId(cfg.appId)}`);
 		lines.push(
-			`权限：allowAll=${cfg.allowAll} · 群 ${cfg.allowGroups.length} 个 · 用户 ${cfg.allowUsers.length} 个`,
+			`acl: allowAll=${cfg.allowAll} · groups ${cfg.allowGroups.length} · users ${cfg.allowUsers.length}`,
 		);
 		const gw = state.gateway;
 		lines.push(
-			`网关：${
+			`gateway: ${
 				gw
-					? `${STATE_LABEL[gw.state] ?? gw.state} · session ${gw.sessionId ? maskId(gw.sessionId) : "无"}${
-							gw.lastCloseCode ? ` · 上次关闭码 ${gw.lastCloseCode}` : ""
+					? `${STATE_LABEL[gw.state] ?? gw.state} · session ${gw.sessionId ? maskId(gw.sessionId) : "none"}${
+							gw.lastCloseCode ? ` · last close code ${gw.lastCloseCode}` : ""
 						}`
-					: "未启动"
+					: "not running"
 			}`,
 		);
 		const svc = readServiceState(serviceStatePath(baseDir()));
-		lines.push(`后台服务：${describeService(svc)}`);
-		lines.push(`锁：${lock ? `pid ${lock.pid}（${lock.at}）` : "无"}`);
+		lines.push(`service: ${describeService(svc)}`);
+		lines.push(`lock: ${lock ? `pid ${lock.pid} (${lock.at})` : "none"}`);
 		if (state.bridge) {
 			const s = state.bridge.status;
 			const flags = [
-				s.busy ? "Pi 忙" : "",
-				s.switching ? "切换中" : "",
-				s.stale ? "已暂停，等新会话接棒" : "",
+				s.busy ? "pi busy" : "",
+				s.switching ? "switching" : "",
+				s.stale ? "paused, waiting for the new session" : "",
 			]
 				.filter(Boolean)
 				.join(" · ");
-			const deferred = s.deferred ? ` · 暂存 ${s.deferred} 条` : "";
+			const deferred = s.deferred ? ` · deferred ${s.deferred}` : "";
 			lines.push(
-				`队列：${s.queue} 条${deferred}${flags ? ` · ${flags}` : ""} · 已收 ${s.stats.received} / 已发 ${s.stats.sent} / 失败 ${s.stats.failed} / 忽略 ${s.stats.ignored}`,
+				`queue: ${s.queue}${deferred}${flags ? ` · ${flags}` : ""} · received ${s.stats.received} / sent ${s.stats.sent} / failed ${s.stats.failed} / ignored ${s.stats.ignored}`,
 			);
 		}
 		if (state.lastInbound) {
-			lines.push(`最近入站：${state.lastInbound.at} · ${state.lastInbound.kind} · 群/人 ${state.lastInbound.chat}`);
+			lines.push(`last inbound: ${state.lastInbound.at} · ${state.lastInbound.kind} · chat ${state.lastInbound.chat}`);
+		}
+		if (cfg.maxChunks) {
+			lines.push(`budget: up to ${cfg.maxChunks} chunks × ${cfg.chunkChars} chars per message`);
 		}
 		try {
 			const sessionId = state.ctx?.sessionManager?.getSessionId?.();
 			const name = state.extensionApi?.getSessionName?.();
-			if (sessionId) lines.push(`Pi 会话：${sessionId}${name ? ` · ${name}` : ""}`);
+			if (sessionId) lines.push(`pi session: ${sessionId}${name ? ` · ${name}` : ""}`);
 			const model = state.ctx?.model ?? state.extensionApi?.model;
 			if (model) {
 				const provider = model.provider ?? "?";
 				const id = model.id ?? model.modelId ?? "?";
-				const thinking = state.extensionApi?.getThinkingLevel?.() ?? "unknown";
-				lines.push(`模型：${provider}/${id} · 思考 ${thinking}`);
+				lines.push(`model: ${provider}/${id}`);
 			}
+			lines.push(`thinking: ${state.extensionApi?.getThinkingLevel?.() ?? "unknown"}`);
 			const usage = state.ctx?.getContextUsage?.();
 			if (usage) {
 				const tokens = usage.tokens ?? usage.usedTokens;
 				const window = usage.contextWindow ?? usage.maxTokens;
-				const percent = Number.isFinite(usage.percent) ? `（${Math.round(usage.percent)}%）` : "";
-				lines.push(`上下文：${tokens ?? "?"} / ${window ?? "?"}${percent}`);
+				const percent = Number.isFinite(usage.percent) ? ` (${Math.round(usage.percent)}%)` : "";
+				lines.push(`context: ${tokens ?? "?"} / ${window ?? "?"}${percent}`);
 			}
 			const tools = state.extensionApi?.getActiveTools?.() ?? [];
-			if (tools.length) lines.push(`工具：${tools.length} 个`);
+			if (tools.length) lines.push(`tools: ${tools.length}`);
 		} catch {
 			// ignore
 		}
-		lines.push(`扩展加载：${JSON.stringify(state.config?.extensions ?? "auto")}`);
 		return lines.join("\n");
 	}
 
 	const HELP = [
-		"用法：/qq <命令>",
-		"  status      查看网关、队列、最近入站、后台服务",
-		"  start       启动后台常驻 pi（QQ 会话交给它）",
-		"  stop        停止后台服务；没有服务时断开本进程网关",
-		"  （开新会话直接用 /new；/qq new 仍可用，是同一条路径）",
-		"  log [n]     看最近 n 条日志（默认 20）",
-		"  take        仅锁冲突时：强制接管网关锁（对方 30 秒内自停）",
+		"usage: /qq <command>",
+		"  status          service, connection, queue, budget",
+		"  start           start the background service",
+		"  stop [--force]  stop the service; disconnects this process when none runs",
+		"  log [n]         show the last n log lines (default 20)",
+		"  help            this list",
+		"  login           verify credentials and restart the service",
+		"  logout          remove clientSecret (backup kept) and disconnect",
 	].join("\n");
 
 	/** 启动后台常驻服务。 */
@@ -500,17 +540,17 @@ export default function createExtension(pi) {
 		if (svc && isServiceAlive(svc)) {
 			// 极端情况下本地还连着网关（例如服务是外部启动的）：先让出，确保只有一条连接
 			stop();
-			setStatus("服务在线", `pid ${svc.pid}`);
-			notify(`后台服务已在运行：${describeService(svc)}`, "info");
+			setStatus("service online", `pid ${svc.pid}`);
+			notify(`background service already running: ${describeService(svc)}`, "info");
 			return;
 		}
 		if (svc) {
 			if (!isProcessAlive(svc.pid)) {
 				removeServiceState(file, svc.pid);
-				notify(`已清理残留状态（pid ${svc.pid} 已退出）`, "info");
+				notify(`cleaned stale service state (pid ${svc.pid} exited)`, "info");
 			} else {
 				notify(
-					`pid ${svc.pid} 还活着但心跳已停，可能是别的进程复用了该 pid。确认后运行 /qq stop --force`,
+					err(CODE.SERVICE_STALE, "service pid is alive but its heartbeat stopped; another process may have reused the pid", `pid ${svc.pid}; run /qq stop --force`),
 					"warning",
 				);
 				return;
@@ -520,14 +560,14 @@ export default function createExtension(pi) {
 		const holder = readLock(lockFilePath());
 		if (holder && holder.pid !== process.pid && isProcessAlive(holder.pid)) {
 			notify(
-				`网关锁被 pid ${holder.pid} 持有：先关掉那个进程，或 /qq take 强制接管，再 /qq start`,
+				err(CODE.LOCK_HELD, "gateway lock is held; close that Pi process, then /qq start", `pid ${holder.pid}`),
 				"warning",
 			);
 			return;
 		}
 		// 本进程先让出网关和锁，交给服务
 		stop();
-		const { pid, logFile: startedLog, error } = startService({
+		const { pid, logFile: startedLog, logHint, error } = await startManagedService({
 			binPath: SERVICE_BIN,
 			baseDir: baseDir(),
 			cwd: state.ctx?.cwd ?? process.cwd(),
@@ -535,25 +575,21 @@ export default function createExtension(pi) {
 		});
 		if (error || !pid) {
 			notify(
-				`后台服务启动失败：${error ?? "没有拿到 pid"}\n本进程的网关已让出，可用 /qq start 重试\n日志：${startedLog}`,
+				err(CODE.SERVICE_START_FAILED, "could not start background service; gateway released, retry /qq start", `${error ?? "no pid"} (log: ${logHint ?? startedLog})`),
 				"warning",
 			);
 			return;
 		}
-		let current = readServiceState(file);
-		for (let i = 0; i < 40 && !(current && isServiceAlive(current)); i++) {
-			await sleep(200);
-			current = readServiceState(file);
-		}
+		const current = readServiceState(file);
 		if (current && isServiceAlive(current)) {
 			notify(
-				`后台服务已启动：${describeService(current)}\nQQ 会话切换到 pi-qq-connect-service（上下文从空开始）\n日志：${startedLog}`,
+				`background service started: ${describeService(current)}\nQQ session moved to pi-qq-connect-service (fresh context)\nlog: ${logHint ?? startedLog}`,
 				"info",
 			);
-			setStatus("服务在线", `pid ${current.pid}`);
+			setStatus("service online", `pid ${current.pid}`);
 		} else {
-			notify(`后台服务启动中（pid ${pid}），稍后用 /qq status 查看。日志：${startedLog}`, "warning");
-			setStatus("服务启动中", `pid ${pid}`);
+			notify(`background service starting (pid ${pid}); check /qq status later; log: ${logHint ?? startedLog}`, "info");
+			setStatus("service starting", `pid ${pid}`);
 		}
 	}
 
@@ -567,17 +603,17 @@ export default function createExtension(pi) {
 			} else {
 				const result = await stopService(svc, { force });
 				if (!result.stopped) {
-					notify(`停止失败：${result.reason}`, "warning");
+					notify(err(CODE.STOP_FAILED, "stop failed", result.reason), "warning");
 					return;
 				}
 				removeServiceState(file, svc.pid);
-				notify("后台服务已停止", "info");
+				notify("background service stopped", "info");
 				setStatus(STATE_LABEL.stopped);
 				return;
 			}
 		}
 		stop();
-		notify("已断开本进程的网关", "info");
+		notify("disconnected this process from the gateway", "info");
 		setStatus(STATE_LABEL.stopped);
 	}
 
@@ -587,7 +623,7 @@ export default function createExtension(pi) {
 		if (commandsRegistered) return;
 		commandsRegistered = true;
 		pi.registerCommand("qq", {
-			description: "QQ 机器人：status / start / stop / log / take（/new 请直接用 /new）",
+			description: "QQ bot: status / start / stop / log / login / logout (use /new for a new session)",
 		handler: async (args, ctx) => {
 			state.ctx = ctx;
 			const [sub, ...rest] = String(args ?? "").trim().split(/\s+/);
@@ -601,51 +637,86 @@ export default function createExtension(pi) {
 				case "stop":
 					await stopBackground(rest.includes("--force"));
 					return;
-				case "new": {
-					// 0.4.0 起 /new 是唯一入口，这里保留成别名，行为完全一样
-					const svc = readServiceState(serviceStatePath(baseDir()));
-					if (svc && isServiceAlive(svc) && !isServiceProcess(svc)) {
-						notify("后台服务在线：QQ 会话由服务管理，请在 QQ 里发 /new；终端 /new 只切本地 TUI", "warning");
-						return;
-					}
-					notify("正在开新会话…", "info");
-					const result = await switchSession(ctx, rest.join(" "));
-					if (!result.ok) notify(`开新会话失败：${result.message ?? "未知原因"}`, "warning");
-					return;
-				}
 				case "__new": {
 					// QQ 侧 /new 的内部通道：结果直接 resolve 给发起者，不再靠轮询猜
 					const pending = state.pendingExec;
 					if (!pending) {
-						notify("没有等待中的开新会话请求", "warning");
+						notify(err(CODE.NEW_SESSION_FAILED, "no pending new-session request"), "warning");
 						return;
 					}
-					notify("正在开新会话…", "info");
+					notify("opening a new session...", "info");
 					const result = await switchSession(ctx, rest.join(" "));
 					pending.done(result);
 					return;
 				}
-				case "log": {
-					const n = Number(rest[0]) > 0 ? Math.min(Number(rest[0]), 200) : 20;
-					const tail = state.logger?.tail(n) ?? ["（没有日志）"];
-					notify(tail.join("\n"), "info");
+				case "login": {
+					const { config, error } = loadConfig();
+					if (error) {
+						notify(err(CODE.LOGIN_FAILED, "config error", error), "warning");
+						return;
+					}
+					const auth = new QqAuth({
+						appId: config.appId,
+						clientSecret: config.clientSecret,
+						tokenUrl: config.endpoints.token || undefined,
+						log: state.logger,
+					});
+					try {
+						await auth.getToken();
+					} catch (cause) {
+						notify(err(CODE.LOGIN_FAILED, "QQ auth failed", cause?.message ?? cause), "warning");
+						return;
+					}
+					notify("QQ credentials verified; restarting background service...", "info");
+					const svc = readServiceState(serviceStatePath(baseDir()));
+					if (svc && isProcessAlive(svc.pid)) {
+						const stopped = await stopService(svc, { force: true });
+						if (!stopped.stopped) {
+							notify(err(CODE.STOP_FAILED, "cannot stop background service; login cancelled", stopped.reason), "warning");
+							return;
+						}
+						removeServiceState(serviceStatePath(baseDir()), svc.pid);
+					}
+					stop({ release: true });
+					await startBackground();
 					return;
 				}
-				case "take": {
-					// 恢复命令：锁被另一个活进程占用时强制接管并本地连网关
+				case "logout": {
 					const svc = readServiceState(serviceStatePath(baseDir()));
-					if (svc && isServiceAlive(svc)) {
-						notify(`后台服务在线（${describeService(svc)}），不需要 /qq take`, "info");
-						return;
+					if (svc && isProcessAlive(svc.pid)) {
+						const stopped = await stopService(svc, { force: true });
+						if (!stopped.stopped) {
+							notify(err(CODE.LOGOUT_BLOCKED, "cannot stop background service; logout cancelled", stopped.reason), "warning");
+							return;
+						}
+						removeServiceState(serviceStatePath(baseDir()), svc.pid);
 					}
-					const lock = acquireLock(lockFilePath(), { force: true });
-					if (!lock.ok) {
-						notify("接管失败", "warning");
-						return;
+					stop({ release: true });
+					const file = configPath();
+					try {
+						const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+						if (!raw.clientSecret) {
+							notify("no clientSecret to remove", "info");
+							setStatus(STATE_LABEL.unconfigured);
+							return;
+						}
+						const backup = `${file}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+						fs.copyFileSync(file, backup);
+						delete raw.clientSecret;
+						const tmp = `${file}.${process.pid}.tmp`;
+						fs.writeFileSync(tmp, JSON.stringify(raw, null, 2), { mode: 0o600 });
+						fs.renameSync(tmp, file);
+						notify(`QQ clientSecret removed (backup: ${backup}); refill it and run /qq login`, "info");
+						setStatus(STATE_LABEL.unconfigured);
+					} catch (cause) {
+						notify(err(CODE.LOGOUT_BLOCKED, "could not update config", cause?.message ?? cause), "warning");
 					}
-					await start(ctx, { keepLock: true });
-					if (state.gateway) notify("已接管网关锁并启动本地网关", "info");
-					else notify(`已接管锁，但没能连接：${state.error ?? "查看 /qq log"}`, "warning");
+					return;
+				}
+				case "log": {
+					const n = Number(rest[0]) > 0 ? Math.min(Number(rest[0]), 200) : 20;
+					const tail = state.logger?.tail(n) ?? ["(no log)"];
+					notify(tail.join("\n"), "info");
 					return;
 				}
 				default:
@@ -675,7 +746,7 @@ export default function createExtension(pi) {
 		if (!state.bridge) {
 			// 没有活动桥（首次启动，或上一个实例的桥已经停了）：直接重建
 			if (reason !== "startup") {
-				notify(`会话已切换（${reason}），当前没有活动桥，正在重建 QQ 连接…`, "warning");
+				notify(`session switched (${reason}); rebuilding QQ connection...`, "info", { silent: true });
 			}
 			void start(ctx);
 			return;

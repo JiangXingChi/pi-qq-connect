@@ -4,6 +4,9 @@
 [![license](https://img.shields.io/npm/l/pi-qq-connect)](LICENSE)
 [English](README.en.md)
 
+> **平台要求：Linux**。后台服务通过 systemd 用户单元（`systemctl --user`）管理，
+> 仅在 Linux 上验证；macOS / Windows 未支持。
+
 把 **QQ 官方机器人**接到**当前 Pi 会话**的插件。零运行时依赖，只用 Node ≥22.19 自带的
 `fetch` / `WebSocket` / `node:crypto` / `node:http`，安装后即可用。
 
@@ -16,7 +19,7 @@
 - 入站去重、串行队列、被动回复预算、窗口兜底、单实例锁、后台常驻服务
 - 会话切换后旧 pi 句柄作废：新会话实例自动接棒，命令与队列都保留（不再停桥、不再 30 秒超时）
 - `/new`、`/resume` 都不会把网关断掉重连
-- QQ 里可用桌面命令：`/new` `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help`
+- QQ 里可用：`/new`（开新会话），以及技能 / 提示模板 / 其它插件命令
 
 ## 前置：注册 QQ 机器人
 
@@ -81,14 +84,13 @@ pi install .
 | 停止 | `/qq stop`：停后台服务；没有服务时断开本进程网关 |
 | 看日志 | `/qq log 50` |
 | 开新会话 | QQ 里发 `/new`（或 `/new 名字`） |
-| 换模型 | `/model` 看清单，`/model 3` 或 `/model provider/id` 切换 |
-| 其它桌面命令 | `/thinking` `/compact` `/session` `/name` `/tools` `/help` |
-| 网关被占用 | `/qq take`：强制接管锁（仅锁冲突时用，对方 30 秒内自停） |
+| 登录 / 登出 | `/qq login` 校验凭据并重启服务；`/qq logout` 停服务并移除 clientSecret |
 | 发文件 | 让 Pi 在回复末尾写 `[[file:/绝对路径]]`，最多 3 个 |
 
-QQ 里的 `/qq` 命令共 5 条：`status` / `start` / `stop` / `log` / `take`（`new` 已并入 `/new`，仍可用）。
+QQ 里的 `/qq` 命令共 7 条：`status` / `start` / `stop` / `log` / `help` / `login` / `logout`。
+聊天窗口只映射 `/new`；`/model` 等控制命令请在终端执行。
 
-后台服务在线时，终端里的 `/qq start`、`/qq stop`、`/qq take` 才起作用；QQ 会话由服务进程管理，
+后台服务在线时，终端里的 `/qq start`、`/qq stop` 才起作用；QQ 会话由服务进程管理，
 终端 `/new` 只切本地 TUI。
 
 ### QQ 里的命令
@@ -97,16 +99,10 @@ QQ 里的 `/qq` 命令共 5 条：`status` / `start` / `stop` / `log` / `take`�
 
 | 命令 | 作用 |
 |---|---|
-| `/new [名称]` | 开新会话，清空队列，网关不断 |
-| `/model` / `/model 3` / `/model provider/id` | 列模型、按序号或名字切换 |
-| `/thinking [级别]` | 查看或切换思考级别（off…max） |
-| `/compact [说明]` | 压缩上下文 |
-| `/session` | 模型、思考级别、上下文用量、会话名、工具数 |
-| `/name [名称]` | 设置会话名 |
-| `/tools` | 当前启用的工具 |
-| `/help` | 命令表 |
+| `/new [名称]` | 开新会话 |
 | `/skill:xxx`、提示模板、其它插件命令 | 原样交给 Pi 执行 |
-| TUI 专用命令（`/resume` `/tree` `/export` 等） | 明确回「只能在终端用」，不会被当成提问 |
+| 控制命令（`/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help`） | 回「只能在终端用」，不会当提问 |
+| TUI 专用命令（`/resume` `/tree` `/export` 等） | 回「只能在终端用」 |
 
 ### 发文件
 
@@ -242,7 +238,7 @@ QQ 每条被动回复最多 5 次、单段 4000 字量级。回答超过分片�
 | 现象 | 处理 |
 |---|---|
 | `/qq status` 显示「未配置」 | 没填 appId/clientSecret，或 JSON 写坏了 |
-| 「被占用 pid x」 | 另一个 pi 进程持有网关；关掉它，或 `/qq take` |
+| 「被占用 pid x」 | 另一个 pi 进程持有网关；关掉那个 pi 进程后重试 |
 | 网关一直「重连中」 | `/qq log 50`：4004 凭据错、4008 限流、4013/4014 intents 没开、4914/4915 沙箱/封禁 |
 | QQ 里没反应 | 群聊必须 @；确认 `allowUsers`/`allowGroups` 里有你的 openid |
 | 回复「消息发送超频」 | 触发回复上限或窗口过期，等用户再发一条 |

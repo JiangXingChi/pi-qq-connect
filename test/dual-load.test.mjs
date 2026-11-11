@@ -3,7 +3,7 @@
  *
  * 把同一份插件复制成两个目录，用 `-e A -e B` 显式加载两份（不依赖本机装了哪些包）：
  * pi 会给两个不同的 `pi` 对象、同一个 `ctx`。必须做到：
- *   1. 只有一个负责人：启动提示（enabled=false）只出现一次；
+ *   1. 只有一个负责人：启动时的 enabled=false 只在日志里落一次；
  *   2. `/qq` 命令只注册一次——同名命令注册两次时 pi 的后果是「谁都别执行」。
  *
  * 没有 `pi` 可执行文件时自动跳过（`npm test` 在纯 Node 环境里仍可跑）。
@@ -44,9 +44,25 @@ test("双实例加载：只一个负责人、命令只注册一次", async (t) =
 	const agentDir = path.join(dir, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
 	const configPath = path.join(dir, "config.json");
+	// 启动类提示只进日志（不进 UI）：用日志计数判断「只有一个负责人启动了桥」
+	const logFile = path.join(dir, "qq.log");
+	const readLog = () => {
+		try {
+			return fs.readFileSync(logFile, "utf8");
+		} catch {
+			return "";
+		}
+	};
 	fs.writeFileSync(
 		configPath,
-		JSON.stringify({ enabled: false, appId: "1234567890", clientSecret: "x", sandbox: true, allowAll: true }),
+		JSON.stringify({
+			enabled: false,
+			appId: "1234567890",
+			clientSecret: "x",
+			sandbox: true,
+			allowAll: true,
+			log: { file: logFile, level: "info" },
+		}),
 	);
 
 	const child = spawn("pi", ["--mode", "rpc", "--no-session", "-e", root, "-e", copy], {
@@ -70,23 +86,24 @@ test("双实例加载：只一个负责人、命令只注册一次", async (t) =
 	};
 
 	try {
-		const started = await until(() => /enabled=false/.test(stdout), "插件启动提示");
+		const started = await until(() => /config has enabled=false/.test(readLog()), "插件启动日志");
 		assert.ok(started, `插件没有启动：${stderr.slice(-800)}`);
 		child.stdin.write(JSON.stringify({ id: "1", type: "prompt", message: "/qq status" }) + "\n");
-		const replied = await until(() => /配置：/.test(stdout), "/qq status 回执");
+		const replied = await until(() => /config: /.test(stdout), "/qq status 回执");
 		assert.ok(replied, `命令没有执行（同名命令重复注册会让谁都别执行）：${stderr.slice(-800)}`);
 
 		await t.test("启动提示只出现一次（只有一个负责人在启动桥）", () => {
-			const hits = stdout.match(/enabled=false/g) ?? [];
+			const hits = readLog().match(/config has enabled=false/g) ?? [];
 			assert.equal(hits.length, 1, `出现 ${hits.length} 次`);
 		});
 		await t.test("命令只回一次", () => {
-			const hits = stdout.match(/配置：/g) ?? [];
+			const hits = stdout.match(/config: /g) ?? [];
 			assert.equal(hits.length, 1, `回执出现 ${hits.length} 次`);
 		});
 		await t.test("AppID 已打码", () => {
-			const line = stdout.split("\n").find((l) => l.includes("环境：")) ?? "";
+			const line = stdout.split("\n").find((l) => l.includes("appid")) ?? "";
 			assert.ok(line.includes("1234***890"), `AppID 没有打码：${line.slice(0, 200)}`);
+			assert.equal(stdout.includes("1234567890"), false, "明文 AppID 不应出现");
 		});
 	} finally {
 		child.kill("SIGTERM");

@@ -194,7 +194,7 @@ function splitFenced(text, limit) {
  */
 export function chunkText(
 	text,
-	{ chunkChars = MAX_CONTENT_CHARS, maxChunks = 4, overflowHint = "……（内容过长，完整结果见 Pi 终端）" } = {},
+	{ chunkChars = MAX_CONTENT_CHARS, maxChunks = 4, overflowHint = "... (message too long, full result in the Pi terminal)" } = {},
 ) {
 	const normalized = String(text ?? "").trim();
 	if (!normalized) return [];

@@ -109,12 +109,12 @@ test("命令处理器抛错时回一句失败，不让消息消失", async () =>
 	bridge.enqueue(chatItem("/new"));
 	await sleep(20);
 	assert.equal(api.sent.length, 1);
-	assert.match(api.sent[0].text, /命令执行失败：boom/);
+	assert.match(api.sent[0].text, /command failed: boom/);
 });
 
 test("换会话期间的消息暂存，结束后放回队列", async () => {
 	const { bridge, api, pi } = makeBridge({
-		onCommand: async (command) => (command.name === "new" ? { text: "✅ 已开新会话" } : null),
+		onCommand: async (command) => (command.name === "new" ? { text: "✅ new session started" } : null),
 	});
 	bridge.beginSwitch();
 	bridge.enqueue(chatItem("切换中发的消息", "m2"));

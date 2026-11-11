@@ -110,10 +110,10 @@ export async function inspectFile(filePath, { maxBytes = HARD_LIMIT, allowDirs =
 	try {
 		real = await fs.promises.realpath(filePath);
 	} catch {
-		return { ok: false, reason: "文件不存在" };
+		return { ok: false, reason: "file not found" };
 	}
 	const normalized = real.split(path.sep).join("/");
-	if (DENY.some((re) => re.test(normalized))) return { ok: false, reason: "敏感路径，拒绝发送" };
+	if (DENY.some((re) => re.test(normalized))) return { ok: false, reason: "path is not allowed" };
 	if (allowDirs.length > 0) {
 		const allowed = allowDirs.map((dir) => {
 			const resolved = path.resolve(expandHome(String(dir)));
@@ -127,12 +127,12 @@ export async function inspectFile(filePath, { maxBytes = HARD_LIMIT, allowDirs =
 			const rel = path.relative(dir, real);
 			return rel === "" || (!rel.startsWith(".." + path.sep) && rel !== ".." && !path.isAbsolute(rel));
 		});
-		if (!inside) return { ok: false, reason: "不在允许的目录里" };
+		if (!inside) return { ok: false, reason: "path is outside the allowed directories" };
 	}
 	const stat = await fs.promises.stat(real);
-	if (!stat.isFile()) return { ok: false, reason: "不是普通文件" };
-	if (stat.size <= 0) return { ok: false, reason: "空文件" };
-	if (stat.size > Math.min(maxBytes, HARD_LIMIT)) return { ok: false, reason: "超过大小限制" };
+	if (!stat.isFile()) return { ok: false, reason: "not a regular file" };
+	if (stat.size <= 0) return { ok: false, reason: "empty file" };
+	if (stat.size > Math.min(maxBytes, HARD_LIMIT)) return { ok: false, reason: "exceeds the size limit" };
 	return { ok: true, path: real, size: stat.size, name: path.basename(real) };
 }
 
@@ -165,7 +165,7 @@ async function hashFile(filePath, size) {
 		stream.on("error", reject);
 		stream.on("end", resolve);
 	});
-	if (seen !== size) throw new Error("文件在读取过程中发生变化");
+	if (seen !== size) throw new Error("file changed while it was being read");
 	return { md5: md5.digest("hex"), sha1: sha1.digest("hex"), md5_10m: md5Head.digest("hex") };
 }
 
@@ -221,7 +221,7 @@ export async function uploadFile(api, target, filePath, { log, maxBytes, allowDi
 		...hashes,
 	}), "预上传", log);
 	if (!prep?.upload_id || !Array.isArray(prep.parts) || prep.parts.length === 0) {
-		throw new Error("预上传没有返回 upload_id 或分片");
+		throw new Error("pre-upload returned no upload_id or part size");
 	}
 	const handle = await fs.promises.open(info.path, "r");
 	try {
@@ -230,13 +230,13 @@ export async function uploadFile(api, target, filePath, { log, maxBytes, allowDi
 		let offset = 0;
 		for (const part of parts) {
 			const block = Number(part.block_size) || Number(prep.block_size);
-			if (!Number.isFinite(block) || block <= 0) throw new Error("分片大小无效");
+			if (!Number.isFinite(block) || block <= 0) throw new Error("invalid part size");
 			// 不能把 block 夹小后继续按顺序累加，否则分片边界和平台不一致，文件会损坏
-			if (block > 64 * 1024 * 1024) throw new Error(`分片过大：${block} 字节`);
+			if (block > 64 * 1024 * 1024) throw new Error(`part is too large: ${block} bytes`);
 			const length = Math.min(block, info.size - offset);
 			if (length <= 0) break;
 			const buf = await readSlice(handle, offset, length);
-			if (buf.length !== length) throw new Error(`分片 ${part.index} 读取不完整（${buf.length}/${length} 字节）`);
+			if (buf.length !== length) throw new Error(`part ${part.index} was read incompletely (${buf.length}/${length} bytes)`);
 			await withRetry(() => api.putPresigned(part.presigned_url, buf), `PUT 分片 ${part.index}`, log);
 			await withRetry(() => api.uploadPartFinish(target, {
 				uploadId: prep.upload_id,
@@ -246,12 +246,12 @@ export async function uploadFile(api, target, filePath, { log, maxBytes, allowDi
 			}), `确认分片 ${part.index}`, log);
 			offset += length;
 		}
-		if (offset !== info.size) throw new Error(`分片只上传了 ${offset}/${info.size} 字节`);
+		if (offset !== info.size) throw new Error(`only ${offset}/${info.size} bytes were uploaded`);
 	} finally {
 		await handle.close();
 	}
 	const merged = await withRetry(() => api.finishUpload(target, { uploadId: prep.upload_id }), "合并分片", log);
-	if (!merged?.file_info) throw new Error("合并分片后没有返回 file_info");
+	if (!merged?.file_info) throw new Error("merging parts returned no file_info");
 	log?.info(`文件已上传：${info.name}（${info.size} 字节，类型 ${fileType}，ttl ${merged.ttl ?? "?"}s）`);
 	return { fileInfo: merged.file_info, ttl: Number(merged.ttl ?? 0), name: info.name, size: info.size, fileType };
 }

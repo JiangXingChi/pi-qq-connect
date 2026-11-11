@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 — 2026-11-11
+
+聊天命令收窄到 `/new`，提示英文化并带错误码，后台服务统一到 systemd。
+
+- 聊天窗口只映射 `/new`：`/model`、`/thinking`、`/compact`、`/session`、`/name`、`/tools`、`/help`
+  与 `/qq take` 等控制命令一律回「runs in the terminal」，不再当提问喂给模型。
+- 技能、提示模板、其它扩展命令照常转发给 Pi；`/tmp ...` 这类路径开头的普通文本按普通
+  消息处理，保留附件、引用、语音。
+- 所有用户可见提示改为英文，warning/error 带 `[QQ_E_*]` 错误码；启动与后台服务状态
+  只写日志，不再弹通知。
+- 新增 `/qq login`（校验 appId/clientSecret 后重启服务）与 `/qq logout`（停服务、备份配置、
+  删除 clientSecret）。
+- 后台服务统一走 systemd 用户单元（`packaging/pi-qq-connect.service`），`/qq start` 优先
+  `systemctl --user start`，没装 unit 才退回 detached 进程；启动提示给出正确的 journal 查询命令。
+- 修复：`catch (err)` 遮蔽 i18n `err()` 导致的 TypeError、技能展开后被判为外来消息
+  （无回复且重复执行）、转发丢附件、注入失败无上限、`logHint` 未消费、`/qq take` 残留提示。
+- 文档：明确 **Linux only**（systemd 用户单元）；命令表同步当前实现。
+
 ## 0.4.1 — 2026-10-27
 
 修「发一次 `/new`，QQ 桥就废掉」。

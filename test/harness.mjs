@@ -26,6 +26,9 @@ export function createFakePi() {
 			commandRegistrations.push(name);
 			commands.set(name, options);
 		},
+		getCommands() {
+			return [...commands.keys()].map((name) => ({ name }));
+		},
 		sendUserMessage(content, options) {
 			if (pi.streaming) throw new Error("Cannot send a user message while the agent is streaming");
 			sent.push({ content, options, at: Date.now() });

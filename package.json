@@ -1,7 +1,7 @@
 {
 	"name": "pi-qq-connect",
-	"version": "0.4.1",
-	"description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻、与终端同能力",
+	"version": "0.5.0",
+	"description": "QQ 官方机器人 ⇄ 当前 Pi 会话：私聊/群聊、出站文件、后台常驻，聊天里只映射 /new（Linux）",
 	"type": "module",
 	"license": "MIT",
 	"author": "JiangXingChi",
@@ -23,7 +23,8 @@
 		"qq",
 		"qqbot",
 		"chatbot",
-		"bridge"
+		"bridge",
+		"linux"
 	],
 	"bin": "bin/pi-qq-connect.mjs",
 	"pi": {

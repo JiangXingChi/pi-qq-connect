@@ -195,7 +195,7 @@ test("文本：分片遵守 chunkChars / maxChunks", () => {
 	const chunks = chunkText(text, { chunkChars: 200, maxChunks: 3 });
 	assert.equal(chunks.length, 3);
 	for (const chunk of chunks) assert.ok(chunk.length <= 200, `块长度 ${chunk.length}`);
-	assert.match(chunks[2], /内容过长/);
+	assert.match(chunks[2], /message too long, full result in the Pi terminal/);
 });
 
 // ---------------------------------------------------------------- 桥
@@ -397,7 +397,7 @@ test("桥：命令处理器抛错时回一句失败", async () => {
 	});
 	bridge.enqueue(privateItem({ msgId: "cmd-3", text: "/new" }));
 	await waitFor(() => api.sends.length === 1);
-	assert.match(api.sends[0].content, /命令执行失败：模拟失败/);
+	assert.match(api.sends[0].content, /command failed: 模拟失败/);
 	assert.equal(api.sends[0].msgId, "cmd-3");
 });
 
@@ -430,7 +430,7 @@ test("桥：回复预算截断", async () => {
 	await waitFor(() => api.sends.length === 2);
 	assert.equal(api.sends.length, 2);
 	assert.equal(new Set(api.sends.map((s) => s.msgSeq)).size, 2);
-	assert.match(api.sends[1].content, /内容过长/);
+	assert.match(api.sends[1].content, /message too long, full result in the Pi terminal/);
 });
 
 test("桥：被动窗口过期后改用同会话最新 msg_id", async () => {
@@ -547,7 +547,7 @@ test("桥：注入被 Pi 静默吞掉时看门狗重排一次并提示", async (
 	bridge.enqueue(privateItem());
 	await waitFor(() => fake.sent.length === 1, { label: "第一次注入" });
 	await waitFor(() => fake.sent.length === 2, { label: "重排后第二次注入", timeoutMs: 2000 });
-	await waitFor(() => notifications.some((m) => /注入 Pi 失败/.test(m)), { label: "失败提示", timeoutMs: 2000 });
+	await waitFor(() => notifications.some((m) => /\[QQ_E_INJECT_FAILED\]/.test(m)), { label: "失败提示", timeoutMs: 2000 });
 	bridge.stop();
 });
 
@@ -571,12 +571,12 @@ test("服务：状态文件、心跳与过期判断", () => {
 	const state = readServiceState(file);
 	assert.equal(state.pid, process.pid);
 	assert.equal(isServiceAlive(state), true);
-	assert.match(describeService(state), /在线/);
+	assert.match(describeService(state), /online/);
 
 	// 心跳过了 45 秒即视为掉线
 	const stale = { ...state, heartbeatAt: new Date(Date.now() - 60_000).toISOString() };
 	assert.equal(isServiceAlive(stale), false);
-	assert.match(describeService(stale), /心跳停了/);
+	assert.match(describeService(stale), /heartbeat stopped/);
 
 	// 死进程 pid 不算在线
 	assert.equal(isServiceAlive({ ...state, pid: 999_999 }), false);
@@ -650,40 +650,79 @@ test("集成：扩展 → 网关 → 注入 → 回 QQ", async () => {
 	await sleep(150);
 	assert.equal(mock.state.identifies.length, identifyCount, "换会话不应重新 identify");
 
-	// /qq status 能跑通
+	// /qq status 能跑通：配置、网关、服务状态都在
 	assert.equal(fake.commands.has("qq"), true);
 	await fake.commands.get("qq").handler("status", ctx);
-	assert.ok(ctx.notifications.some((n) => /后台服务/.test(n.message)));
+	const status = ctx.notifications.at(-1).message;
+	assert.match(status, /service: not running/);
+	assert.match(status, /gateway: online/);
 	await fake.commands.get("qq").handler("bogus", ctx);
-	assert.ok(ctx.notifications.at(-1).message.includes("take"), "帮助里应包含 take");
+	assert.match(ctx.notifications.at(-1).message, /usage: \/qq <command>/, "未知子命令回用法");
+	// 终端 /qq new 已移除：只回用法，不再切本地会话
 	await fake.commands.get("qq").handler("new 测试会话", ctx);
-	assert.equal(ctx.newSessions.length, 1, "终端 /qq new 应调用 ctx.newSession");
-	assert.deepEqual(ctx.sessionInfo, ["测试会话"]);
-	await fake.commands.get("qq").handler("status", ctx);
-	assert.ok(ctx.notifications.some((n) => /网关/.test(n.message)));
+	assert.equal(ctx.newSessions.length, 0, "终端 /qq new 不再切会话");
+	assert.match(ctx.notifications.at(-1).message, /usage: \/qq <command>/);
 
 	// QQ 侧 /new：派发给内部命令 /qq __new，命令执行完直接回执，网关不断
 	const identifyBeforeCmd = mock.state.identifies.length;
 	const newSessionsBefore = ctx.newSessions.length;
-	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-1", userOpenId: "user-1", content: "/new" }));
-	await waitFor(() => fake.sent.some((s) => String(s.content).trim() === "/qq __new"), { label: "/new 派发" });
-	const dispatched = fake.sent.find((s) => String(s.content).trim() === "/qq __new");
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-1", userOpenId: "user-1", content: "/new 测试会话" }));
+	await waitFor(() => fake.sent.some((s) => String(s.content).trim() === "/qq __new 测试会话"), { label: "/new 派发" });
+	const dispatched = fake.sent.find((s) => String(s.content).trim() === "/qq __new 测试会话");
 	assert.equal(dispatched.options?.expandPromptTemplates, true);
 
-	await fake.commands.get("qq").handler("__new", ctx);
+	await fake.commands.get("qq").handler("__new 测试会话", ctx);
 	assert.equal(ctx.newSessions.length, newSessionsBefore + 1, "/new 应调用 ctx.newSession");
+	assert.deepEqual(ctx.sessionInfo, ["测试会话"], "会话名应交给 newSession 的 setup");
 	await fake.emit("session_shutdown", { type: "session_shutdown", reason: "new" }, ctx);
 	await fake.emit("session_start", { type: "session_start", reason: "new" }, ctx);
-	await waitFor(() => mock.state.sends.some((s) => /已开新会话/.test(String(s.body.content ?? ""))), { label: "新会话回执" });
+	await waitFor(() => mock.state.sends.some((s) => /new session started/.test(String(s.body.content ?? ""))), { label: "新会话回执" });
 	assert.equal(mock.state.identifies.length, identifyBeforeCmd, "/new 不应重连网关");
 
-	// /qq new 只剩改名提示，不会再切会话
-	const sendsBeforeAlias = mock.state.sends.length;
-	const sessionsBeforeAlias = ctx.newSessions.length;
-	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-2", userOpenId: "user-1", content: "/qq new" }));
-	await waitFor(() => mock.state.sends.length > sendsBeforeAlias, { label: "/qq new 别名提示" });
-	assert.match(String(mock.state.sends.at(-1).body.content ?? ""), /已并入「\/new」/);
-	assert.equal(ctx.newSessions.length, sessionsBeforeAlias, "/qq new 不应再切会话");
+	// 聊天里的控制命令：只回「去终端用」，不进模型
+	const sendsBeforeCtl = mock.state.sends.length;
+	const injectedBeforeCtl = fake.sent.length;
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-2", userOpenId: "user-1", content: "/model" }));
+	await waitFor(() => mock.state.sends.length > sendsBeforeCtl, { label: "/model 回执" });
+	assert.match(
+		String(mock.state.sends.at(-1).body.content ?? ""),
+		/\[QQ_E_TUI_ONLY\] \/model runs in the terminal; only \/new works here/,
+	);
+	assert.equal(fake.sent.length, injectedBeforeCtl, "控制命令不能喂给模型");
+
+	// /qq 在聊天里也不再可用（包括 /qq new：只剩 /new）
+	const sessionsBeforeQq = ctx.newSessions.length;
+	const sendsBeforeQq = mock.state.sends.length;
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-3", userOpenId: "user-1", content: "/qq new" }));
+	await waitFor(() => mock.state.sends.length > sendsBeforeQq, { label: "/qq new 回执" });
+	assert.match(String(mock.state.sends.at(-1).body.content ?? ""), /\[QQ_E_TUI_ONLY\] \/qq runs in the terminal/);
+	assert.equal(ctx.newSessions.length, sessionsBeforeQq, "/qq new 不应再切会话");
+
+	// 扩展命令（技能/模板）：原样转发给 Pi 展开，保持 / 开头、不套信封
+	fake.pi.registerCommand("skill:demo", { handler: async () => {} });
+	const injectedBeforeSkill = fake.sent.length;
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-4", userOpenId: "user-1", content: "/skill:demo 查询" }));
+	await waitFor(() => fake.sent.length > injectedBeforeSkill, { label: "扩展命令转发" });
+	const skill = fake.sent.at(-1);
+	assert.equal(String(skill.content).trim(), "/skill:demo 查询");
+	assert.equal(skill.options?.expandPromptTemplates, true, "扩展命令要交给 Pi 展开");
+
+	// 结束这一轮，后面的转发才能进队列
+	const sendsBeforeSkillReply = mock.state.sends.length;
+	await fake.emit("agent_start", { type: "agent_start" }, ctx);
+	await fake.emit("message_end", { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "skill ok" }] } }, ctx);
+	await fake.emit("agent_settled", { type: "agent_settled", aborted: false }, ctx);
+	await waitFor(() => mock.state.sends.length > sendsBeforeSkillReply, { label: "扩展命令回复" });
+
+	// 其余 /... 当普通文本转发：保留信封与附件，不按模板展开
+	const sendsBeforeText = mock.state.sends.length;
+	const injectedBeforeText = fake.sent.length;
+	mock.dispatch("C2C_MESSAGE_CREATE", c2cEvent({ msgId: "cmd-5", userOpenId: "user-1", content: "/tmp 为什么写满了" }));
+	await waitFor(() => fake.sent.length > injectedBeforeText, { label: "斜杠文本转发" });
+	const forwarded = fake.sent.at(-1);
+	assert.match(String(forwarded.content), /\/tmp 为什么写满了/);
+	assert.equal(forwarded.options?.expandPromptTemplates, undefined, "普通文本不展开模板");
+	assert.equal(mock.state.sends.length, sendsBeforeText, "转发不直接回执");
 
 	assert.equal(extension.error, null);
 } finally {
@@ -721,28 +760,38 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 	await fake.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
 	await sleep(200);
 	assert.equal(mock.state.identifies.length, 0, "不应连接网关");
-	assert.ok(ctx.notifications.some((n) => /后台服务在线/.test(n.message)));
+	// 启动类提示只进日志，能观察的是状态栏
+	assert.ok(
+		ctx.statuses.some((s) => s.key === "qqbot" && /service online/.test(s.text)),
+		"状态栏应显示 service online",
+	);
 
-	// 服务在线时 /qq take 不应抢锁或连网关
+	// /qq take 已移除：只回用法，不抢锁、不连网关
 	await fake.commands.get("qq").handler("take", ctx);
-	assert.ok(ctx.notifications.some((n) => /不需要 \/qq take/.test(n.message)));
+	assert.match(ctx.notifications.at(-1).message, /usage: \/qq <command>/);
 	assert.equal(mock.state.identifies.length, 0);
 
+	// 终端 /qq new 已移除，不会再切本地会话
 	await fake.commands.get("qq").handler("new", ctx);
-	assert.equal(ctx.newSessions.length, 0, "服务在线时终端 /qq new 不应切换本地会话");
-	assert.ok(ctx.notifications.some((n) => /QQ 里发 \/new/.test(n.message)));
+	assert.equal(ctx.newSessions.length, 0, "终端 /qq new 不再切换会话");
+	assert.match(ctx.notifications.at(-1).message, /usage: \/qq <command>/);
 
-	// 环境变量被工具子进程继承、但 ppid 不对：仍按 TUI 处理，不许借服务身份绕过
-	const beforeSpoof = ctx.newSessions.length;
+	// 没有等待中的 /new 请求时，__new 不能凭空切会话
+	await fake.commands.get("qq").handler("__new", ctx);
+	assert.equal(ctx.newSessions.length, 0, "没有发起 /new 时 __new 不应切会话");
+	assert.match(ctx.notifications.at(-1).message, /no pending new-session request/);
+
+	// 环境变量被工具子进程继承、但 ppid 不对：仍按控制面处理，不许借服务身份绕过
 	process.env.PIQQCONNECT_SERVICE_PID = String(process.pid);
 	try {
-		await fake.commands.get("qq").handler("new", ctx);
-		assert.equal(ctx.newSessions.length, beforeSpoof, "只有 ppid 对得上的服务进程才放行");
+		await fake.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+		await sleep(200);
+		assert.equal(mock.state.identifies.length, 0, "只有 ppid 对得上的服务进程才放行");
 	} finally {
 		delete process.env.PIQQCONNECT_SERVICE_PID;
 	}
 
-	// 服务进程自己执行 /qq new 时必须放行（QQ 侧的 /qq new 就是走到这里）。
+	// 服务进程自己（状态文件 pid 就是自己的 ppid）必须按服务身份连网关。
 	// 真实的父子关系：状态文件 pid 是启动器，pi 子进程的 ppid 就是它。
 	writeServiceState(serviceFile, {
 		pid: process.ppid,
@@ -752,8 +801,8 @@ test("集成：后台服务在线时本地不抢网关", async () => {
 	});
 	process.env.PIQQCONNECT_SERVICE_PID = String(process.ppid);
 	try {
-		await fake.commands.get("qq").handler("new", ctx);
-		assert.equal(ctx.newSessions.length, 1, "服务进程自己的 /qq new 应切换会话");
+		await fake.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+		await waitFor(() => mock.state.identifies.length === 1, { label: "服务进程自己连网关" });
 	} finally {
 		delete process.env.PIQQCONNECT_SERVICE_PID;
 	}
@@ -773,5 +822,10 @@ test("集成：缺配置时不连接并给出提示", async () => {
 	const ctx = createFakeCtx();
 	createExtension(fake.pi);
 	await fake.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-	assert.ok(ctx.notifications.some((n) => /配置文件不存在/.test(n.message)));
+	const message = ctx.notifications.at(-1)?.message ?? "";
+	assert.match(message, /\[QQ_E_NO_CONFIG\] config error: config file not found/);
+	assert.ok(
+		ctx.statuses.some((s) => s.key === "qqbot" && /unconfigured/.test(s.text)),
+		"状态栏应显示 unconfigured",
+	);
 });

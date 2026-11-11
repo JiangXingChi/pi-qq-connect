@@ -66,7 +66,7 @@ test("文件校验：拒绝敏感路径与空文件", async () => {
 	await fs.promises.writeFile(empty, "");
 	const emptyResult = await inspectFile(empty);
 	assert.equal(emptyResult.ok, false);
-	assert.match(emptyResult.reason, /空文件/);
+	assert.match(emptyResult.reason, /empty file/);
 
 	const sshDir = path.join(dir, ".ssh");
 	await fs.promises.mkdir(sshDir);

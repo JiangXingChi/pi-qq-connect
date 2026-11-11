@@ -4,6 +4,9 @@
 [![license](https://img.shields.io/npm/l/pi-qq-connect)](LICENSE)
 [中文](README.md)
 
+> **Platform: Linux only.** The background service is managed by a systemd *user* unit
+> (`systemctl --user`); other platforms are neither tested nor supported.
+
 Bridge the **official QQ bot platform** to the **current Pi session**. Zero runtime dependencies
 (Node >= 22.19 built-ins only).
 
@@ -40,12 +43,12 @@ openid to `allowUsers` and turn `allowAll` off.
 | Command | Purpose |
 |---|---|
 | `/qq status` | gateway, queue, last inbound, background service |
-| `/qq start` | start the detached service |
-| `/qq stop` | stop the service (or disconnect this process) |
-| `/new [name]` | new Pi session, gateway stays connected (same as the terminal) |
-| `/model` `/thinking` `/compact` `/session` `/name` `/tools` `/help` | the desktop commands, answered in QQ |
+| `/qq start` / `/qq stop` | start / stop the systemd background service |
 | `/qq log [n]` | tail the log |
-| `/qq take` | take over the gateway lock (only on lock conflicts) |
+| `/qq login` | validate appId/clientSecret, restart the service |
+| `/qq logout` | stop the service, back up the config and remove clientSecret |
+| `/new [name]` | new Pi session (the only mapped Pi command) |
+| `/skill:xxx`, prompt templates, other extensions | forwarded to Pi unchanged |
 
 When the background service is online, terminal `/qq new` is refused (use `/new` from QQ); terminal
 `/new` only changes the local TUI session. The QQ session belongs to the service process.

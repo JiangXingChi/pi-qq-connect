@@ -6,7 +6,11 @@
  * - `/qq start|stop` 通过 detached spawn / SIGTERM 管理它
  */
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import os from "node:os";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 import fs from "node:fs";
 import path from "node:path";
 
@@ -19,6 +23,47 @@ export function serviceStatePath(baseDir) {
 export function serviceLogPath(baseDir) {
 	return path.join(baseDir, "pi-qq-connect.service.log");
 }
+
+export function hasSystemdUnit() {
+	return fs.existsSync(path.join(os.homedir(), ".config", "systemd", "user", "pi-qq-connect.service"));
+}
+
+/**
+ * 启动后台服务：装了 systemd 单元就交给 systemctl（日志进 journal、开机自启一致），
+ * 否则退回 detached spawn。返回时尽量等到心跳上线。
+ */
+export async function startManagedService({ binPath, baseDir, cwd, sessionId = "pi-qq-connect-service" }, { waitMs = 8000 } = {}) {
+	const logFile = serviceLogPath(baseDir);
+	let usedSystemd = false;
+	if (hasSystemdUnit()) {
+		let systemdError = "";
+		try {
+			await execFileAsync("systemctl", ["--user", "start", "pi-qq-connect.service"], { timeout: 5_000 });
+		} catch (cause) {
+			systemdError = String(cause?.stderr || cause?.message || "systemctl failed").trim();
+		}
+		if (!systemdError) {
+			usedSystemd = true;
+		} else {
+			const started = startService({ binPath, baseDir, cwd, sessionId });
+			if (!started.pid) {
+				return { pid: null, logFile, systemd: false, error: `${systemdError}; fallback start failed: ${started.error ?? "unknown reason"}` };
+			}
+		}
+	} else {
+		const started = startService({ binPath, baseDir, cwd, sessionId });
+		if (!started.pid) return { ...started, systemd: false };
+	}
+	const stateFile = serviceStatePath(baseDir);
+	const deadline = Date.now() + waitMs;
+	while (Date.now() < deadline) {
+		const state = readServiceState(stateFile);
+		if (state && isServiceAlive(state)) return { pid: state.pid, logFile, systemd: usedSystemd, logHint: usedSystemd ? "journalctl --user -u pi-qq-connect -n 50" : undefined };
+		await new Promise((resolve) => setTimeout(resolve, 200));
+	}
+	return { pid: null, logFile, systemd: usedSystemd, logHint: usedSystemd ? "journalctl --user -u pi-qq-connect -n 50" : undefined, error: "service did not come online within 8s" };
+}
+
 
 export function readServiceState(file) {
 	try {
@@ -66,13 +111,13 @@ export function isServiceAlive(state, { now = Date.now(), staleMs = HEARTBEAT_ST
 }
 
 export function describeService(state, { now = Date.now(), staleMs = HEARTBEAT_STALE_MS } = {}) {
-	if (!state) return "未运行";
+	if (!state) return "not running";
 	const alive = isProcessAlive(state.pid);
 	const fresh = isServiceAlive(state, { now, staleMs });
 	const parsed = Date.parse(state.heartbeatAt ?? "");
 	const beat = Number.isFinite(parsed) ? Math.round((now - parsed) / 1000) : null;
-	const detail = !alive ? "进程已退出" : fresh ? "在线" : beat === null ? "心跳时间未知" : `心跳停了 ${beat}s`;
-	return `pid ${state.pid} · ${detail} · 会话 ${state.sessionId ?? "?"}`;
+	const detail = !alive ? "process exited" : fresh ? "online" : beat === null ? "heartbeat time unknown" : `heartbeat stopped ${beat}s ago`;
+	return `pid ${state.pid} · ${detail} · session ${state.sessionId ?? "?"}`;
 }
 
 /**
@@ -82,10 +127,10 @@ export function describeService(state, { now = Date.now(), staleMs = HEARTBEAT_S
 export function startService({ binPath, baseDir, cwd, sessionId = "pi-qq-connect-service", nodePath = process.execPath }) {
 	const logFile = serviceLogPath(baseDir);
 	if (!fs.existsSync(binPath)) {
-		return { pid: null, logFile, error: `找不到启动脚本：${binPath}` };
+		return { pid: null, logFile, error: `start script not found: ${binPath}` };
 	}
 	if (!fs.existsSync(cwd)) {
-		return { pid: null, logFile, error: `工作目录不存在：${cwd}` };
+		return { pid: null, logFile, error: `working directory does not exist: ${cwd}` };
 	}
 	fs.mkdirSync(path.dirname(logFile), { recursive: true });
 	try {
@@ -144,11 +189,11 @@ export async function stopService(state, { timeoutMs = 10_000, intervalMs = 200,
 	if (!force && !isServiceAlive(state)) {
 		return {
 			stopped: false,
-			reason: `pid ${state.pid} 还活着但心跳已停，可能是别的进程复用了该 pid；确认后用 /qq stop --force`,
+			reason: `pid ${state.pid} is alive but the heartbeat stopped; another process may have reused the pid; run /qq stop --force after confirming`,
 		};
 	}
 	if (force && !looksLikeService(state.pid)) {
-		return { stopped: false, reason: `pid ${state.pid} 看起来不是 pi-qq-connect，拒绝强制结束` };
+		return { stopped: false, reason: `pid ${state.pid} does not look like pi-qq-connect; refusing to force-kill` };
 	}
 	try {
 		process.kill(state.pid, "SIGTERM");
@@ -160,7 +205,7 @@ export async function stopService(state, { timeoutMs = 10_000, intervalMs = 200,
 		if (!isProcessAlive(state.pid)) return { stopped: true };
 		await new Promise((resolve) => setTimeout(resolve, intervalMs));
 	}
-	return { stopped: false, reason: `进程 ${state.pid} 在 ${timeoutMs}ms 内没有退出` };
+	return { stopped: false, reason: `process ${state.pid} did not exit within ${timeoutMs}ms` };
 }
 
 
